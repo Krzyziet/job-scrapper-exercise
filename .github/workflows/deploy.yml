@@ -1,0 +1,39 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        run: |
+          docker build -t "europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/job-scrapper-exercise/app:latest" .
+          docker push "europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/job-scrapper-exercise/app:latest"
+
+      - name: Update Cloud Run Job
+        run: |
+          gcloud run jobs update job-scrapper-exercise \
+            --image="europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/job-scrapper-exercise/app:latest" \
+            --region=europe-west1
