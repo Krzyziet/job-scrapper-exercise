@@ -1,0 +1,8 @@
+requests
+beautifulsoup4
+anthropic
+python-dotenv
+python-docx
+schedule
+playwright
+openpyxl
