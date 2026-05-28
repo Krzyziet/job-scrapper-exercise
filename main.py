@@ -241,7 +241,7 @@ def _check_env():
 def run(no_analyze: bool = False, limit: int = None):
     from modules.scraper import scrape_all
     from modules.analyzer import analyze_all, _normalize_salary_pln
-    from modules.db import init_db, get_known_urls, insert_offers, mark_notified
+    from modules.db import init_db, get_known_urls, insert_offers, mark_notified, update_offer_status
 
     _check_env()
     logger.info("=== Job Hunter START ===")
@@ -258,6 +258,8 @@ def run(no_analyze: bool = False, limit: int = None):
 
     total_scraped = len(offers)
     print(f"\n{GREEN}Pobrano {total_scraped} unikalnych ofert.{RESET}")
+
+    update_offer_status({o.get("url") for o in offers if o.get("url")})
 
     if limit:
         offers = offers[:limit]

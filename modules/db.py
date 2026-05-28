@@ -35,9 +35,14 @@ def init_db():
                 verdict      VARCHAR(10),
                 match_reason TEXT,
                 scraped_at   TIMESTAMPTZ DEFAULT NOW(),
-                notified_at  TIMESTAMPTZ
+                notified_at  TIMESTAMPTZ,
+                missed_count SMALLINT DEFAULT 0,
+                expired_at   TIMESTAMPTZ
             )
         """))
+        # migracja dla istniejących tabel
+        conn.execute(text("ALTER TABLE offers ADD COLUMN IF NOT EXISTS missed_count SMALLINT DEFAULT 0"))
+        conn.execute(text("ALTER TABLE offers ADD COLUMN IF NOT EXISTS expired_at TIMESTAMPTZ"))
     logger.info("[DB] Tabela offers gotowa")
 
 
@@ -75,6 +80,31 @@ def insert_offers(offers: list[dict]) -> None:
             ],
         )
     logger.info(f"[DB] Zapisano {len(offers)} ofert")
+
+
+def update_offer_status(active_urls: set[str]) -> None:
+    if not active_urls:
+        return
+    urls = list(active_urls)
+    engine = get_engine()
+    with engine.begin() as conn:
+        # oferty które wróciły – resetuj licznik
+        conn.execute(
+            text("UPDATE offers SET missed_count = 0 WHERE url = ANY(:urls) AND missed_count > 0"),
+            {"urls": urls},
+        )
+        # oferty nieobecne w tym scrapingu – zwiększ licznik
+        conn.execute(
+            text("UPDATE offers SET missed_count = missed_count + 1 WHERE url != ALL(:urls) AND expired_at IS NULL"),
+            {"urls": urls},
+        )
+        # oznacz jako wygasłe po 2 nieobecnościach
+        result = conn.execute(
+            text("UPDATE offers SET expired_at = NOW() WHERE missed_count >= 2 AND expired_at IS NULL RETURNING url"),
+        )
+        expired_count = result.rowcount
+    if expired_count:
+        logger.info(f"[DB] Oznaczono {expired_count} ofert jako wygasłe")
 
 
 def mark_notified(offers: list[dict]) -> None:
