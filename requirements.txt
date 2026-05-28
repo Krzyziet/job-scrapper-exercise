@@ -6,3 +6,5 @@ python-docx
 schedule
 playwright
 openpyxl
+sqlalchemy==2.0.36
+pg8000==1.31.2

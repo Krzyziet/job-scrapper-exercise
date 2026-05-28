@@ -241,9 +241,12 @@ def _check_env():
 def run(no_analyze: bool = False, limit: int = None):
     from modules.scraper import scrape_all
     from modules.analyzer import analyze_all, _normalize_salary_pln
+    from modules.db import init_db, get_known_urls, insert_offers, mark_notified
 
     _check_env()
     logger.info("=== Job Hunter START ===")
+
+    init_db()
 
     # 1. Scraping
     logger.info("Krok 1: Scraping ofert ze wszystkich portali...")
@@ -263,17 +266,25 @@ def run(no_analyze: bool = False, limit: int = None):
     # Normalizacja walut zawsze – niezależnie od trybu
     offers = [_normalize_salary_pln(o) for o in offers]
 
+    known_urls = get_known_urls()
+    new_offers = [o for o in offers if o.get("url") not in known_urls]
+    logger.info(f"Nowe oferty: {len(new_offers)} / {len(offers)} łącznie")
+
+    if not new_offers:
+        logger.info("Brak nowych ofert – kończę")
+        return
+
     if no_analyze:
         print(f"{YELLOW}Tryb --no-analyze: brak scoringu i predykcji płac.{RESET}")
-        print_results(offers)
-        json_path, xls_path = save_results(offers)
+        print_results(new_offers)
+        json_path, xls_path = save_results(new_offers)
         print(f"Zapisano: {json_path}")
         print(f"Zapisano: {xls_path}")
         return
 
     # 2. Analiza (Claude lub reguły)
-    logger.info(f"Krok 2: Analiza {len(offers)} ofert...")
-    scored = analyze_all(offers)
+    logger.info(f"Krok 2: Analiza {len(new_offers)} ofert...")
+    scored = analyze_all(new_offers)
 
     if not scored:
         print(f"\n{YELLOW}Brak ofert po filtrze wynagrodzenia.{RESET}")
@@ -285,6 +296,7 @@ def run(no_analyze: bool = False, limit: int = None):
           f"/  {len(scored)} łącznie po filtrze wynagrodzenia{RESET}")
 
     # 3. Wyniki
+    insert_offers(scored)
     print_results(scored)
     json_path, xls_path = save_results(scored)
     print(f"{DIM}Wyniki zapisano do: {json_path}{RESET}")
@@ -297,6 +309,9 @@ def run(no_analyze: bool = False, limit: int = None):
         print(f"{GREEN}[OK] Raport wysłany e-mailem{RESET}")
     else:
         print(f"{YELLOW}[!] E-mail pominięty – ustaw GMAIL_APP_PASSWORD w .env{RESET}")
+
+    to_notify = [o for o in scored if o.get("verdict") == "APPLY"]
+    mark_notified(to_notify)
 
     logger.info(f"=== Job Hunter KONIEC – {apply_count} APPLY / {len(scored)} łącznie ===")
 
