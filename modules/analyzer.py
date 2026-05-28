@@ -289,7 +289,7 @@ def _call_claude(prompt: str, max_tokens: int = 300) -> dict | None:
     try:
         client = anthropic.Anthropic(api_key=os.environ["CLAUDE_API_KEY"])
         msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",  # najtańszy model Anthropic
+            model="claude-sonnet-4-6",
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
