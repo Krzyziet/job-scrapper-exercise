@@ -229,11 +229,10 @@ def _check_env():
     from modules.analyzer import claude_available
     key = claude_available()
     if not key:
-        print(f"\n{YELLOW}[!] CLAUDE_API_KEY nie ustawiony w .env{RESET}")
+        print(f"\n{YELLOW}[!] CLAUDE_API_KEY nie ustawiony lub nieprawidłowy{RESET}")
         print(f"{DIM}   Scoring i predykcja płac działają w trybie REGUŁ (bez AI).{RESET}")
-        print(f"{DIM}   Żeby włączyć pełną analizę AI:{RESET}")
-        print(f"{DIM}   1. Wejdź na https://console.anthropic.com -> API Keys{RESET}")
-        print(f"{DIM}   2. Stwórz klucz i wklej do pliku .env jako CLAUDE_API_KEY=sk-ant-...\n{RESET}")
+        print(f"{DIM}   Lokalnie: ustaw CLAUDE_API_KEY=sk-ant-... w pliku .env{RESET}")
+        print(f"{DIM}   Cloud Run: zaktualizuj sekret CLAUDE_API_KEY w Secret Manager\n{RESET}")
     else:
         print(f"\n{GREEN}[OK] Claude API aktywny – pełna analiza AI{RESET}")
 
