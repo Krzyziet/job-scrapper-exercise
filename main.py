@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 import openpyxl
+from modules.company_urls import get_company_url
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
@@ -23,10 +24,18 @@ if hasattr(sys.stdout, "reconfigure"):
 
 load_dotenv()
 
+_LOGS_DIR = Path("logs")
+_LOGS_DIR.mkdir(exist_ok=True)
+_log_file = _LOGS_DIR / f"job_hunter_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(_log_file, encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -117,8 +126,6 @@ def _salary_type(o: dict) -> str:
 
 
 def _save_xlsx(offers: list[dict], path: Path) -> None:
-    from modules.company_urls import get_company_url
-
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Oferty"

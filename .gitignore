@@ -16,3 +16,4 @@ venv/
 templates/*.docx
 generated_cvs/
 *.log
+logs/
