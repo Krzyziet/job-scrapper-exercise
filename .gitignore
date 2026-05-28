@@ -1,3 +1,5 @@
+results/
+githubs-sa-key.json
 .env
 .env.example
 api_key.env
