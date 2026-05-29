@@ -1,3 +1,4 @@
+import json
 import os
 import logging
 import sqlalchemy
@@ -40,10 +41,22 @@ def init_db():
                 expired_at   TIMESTAMPTZ
             )
         """))
-        # migracja dla istniejących tabel
+        # migracje istniejących tabel
         conn.execute(text("ALTER TABLE offers ADD COLUMN IF NOT EXISTS missed_count SMALLINT DEFAULT 0"))
         conn.execute(text("ALTER TABLE offers ADD COLUMN IF NOT EXISTS expired_at TIMESTAMPTZ"))
-    logger.info("[DB] Tabela offers gotowa")
+        conn.execute(text("ALTER TABLE offers ADD COLUMN IF NOT EXISTS dimensions JSONB"))
+        conn.execute(text("ALTER TABLE offers ADD COLUMN IF NOT EXISTS final_score NUMERIC(4,2)"))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS feedback (
+                id         SERIAL PRIMARY KEY,
+                offer_id   INTEGER REFERENCES offers(id),
+                thumb      SMALLINT,
+                reason     TEXT,
+                outcome    VARCHAR(20),
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """))
+    logger.info("[DB] Tabela offers i feedback gotowe")
 
 
 def get_known_urls() -> set[str]:
@@ -60,8 +73,8 @@ def insert_offers(offers: list[dict]) -> None:
     with engine.begin() as conn:
         conn.execute(
             text("""
-                INSERT INTO offers (url, title, company, location, salary, source, score, verdict, match_reason)
-                VALUES (:url, :title, :company, :location, :salary, :source, :score, :verdict, :match_reason)
+                INSERT INTO offers (url, title, company, location, salary, source, score, verdict, match_reason, dimensions, final_score)
+                VALUES (:url, :title, :company, :location, :salary, :source, :score, :verdict, :match_reason, :dimensions, :final_score)
                 ON CONFLICT (url) DO NOTHING
             """),
             [
@@ -75,6 +88,8 @@ def insert_offers(offers: list[dict]) -> None:
                     "score":        o.get("score"),
                     "verdict":      o.get("verdict", ""),
                     "match_reason": o.get("match_reason", ""),
+                    "dimensions":   json.dumps(o["dimensions"]) if o.get("dimensions") else None,
+                    "final_score":  o.get("final_score"),
                 }
                 for o in offers
             ],
@@ -120,3 +135,28 @@ def mark_notified(offers: list[dict]) -> None:
             {"urls": urls},
         )
     logger.info(f"[DB] Oznaczono {len(urls)} ofert jako notified")
+
+
+def add_feedback(url_or_offer_id, thumb: int, reason: str = None, outcome: str = None) -> None:
+    """Zapisuje ocenę kandydata dla oferty. url_or_offer_id może być URL (str) lub offer.id (int)."""
+    engine = get_engine()
+    with engine.begin() as conn:
+        if isinstance(url_or_offer_id, str):
+            row = conn.execute(
+                text("SELECT id FROM offers WHERE url = :url"),
+                {"url": url_or_offer_id},
+            ).fetchone()
+            if not row:
+                logger.warning(f"[DB] add_feedback: nie znaleziono oferty dla url={url_or_offer_id!r}")
+                return
+            offer_id = row[0]
+        else:
+            offer_id = url_or_offer_id
+        conn.execute(
+            text("""
+                INSERT INTO feedback (offer_id, thumb, reason, outcome)
+                VALUES (:offer_id, :thumb, :reason, :outcome)
+            """),
+            {"offer_id": offer_id, "thumb": thumb, "reason": reason, "outcome": outcome},
+        )
+    logger.info(f"[DB] Feedback zapisany dla offer_id={offer_id} thumb={thumb}")

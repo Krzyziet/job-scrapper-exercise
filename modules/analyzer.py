@@ -3,6 +3,15 @@ import re
 import json
 import logging
 
+from modules.profile import (
+    CANDIDATE_PROFILE,
+    WEIGHTS,
+    BOOSTERS,
+    STRETCH_PENALTIES,
+    VERDICT_THRESHOLD,
+    compute_final_score,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,38 +27,6 @@ SALARY_TOLERANCE = 2000  # akceptujemy oferty do 2k poniżej minimum
 _USD_TO_PLN = 4.05
 _EUR_TO_PLN = 4.28
 _GBP_TO_PLN = 5.15
-
-CANDIDATE_PROFILE = """
-Krzysztof Zieliński – Technical Product Owner @ ING Hubs Poland
-Background: Network Engineer → Product Owner (5+ lat doświadczenia)
-Lokalizacja: Łódź, Polska
-
-Certyfikaty: PSPO I, CCNP Enterprise, CCNA
-
-Mocne strony:
-- Zarządzanie 18-osobowym zespołem Network Operations (ING) – Director's Award
-- Product ownership: roadmap planning, backlog management, sprint reviews
-- Stakeholder management, ITSM, Incident & Change Management
-- Technologie: Cisco, Palo Alto, F5, VMware ESXi
-- Narzędzia: Jira, Confluence, HP Service Manager
-- Angielski B2
-- Branże: bankowość (ING), fintech, telco
-
-Oczekiwania płacowe: ~23 000 zł brutto UoP / ~25 000 zł netto B2B
-Preferencja lokalizacji (od najlepszej):
-1. Łódź hybrydowo / stacjonarnie – priorytet absolutny
-2. W pełni zdalnie (full remote)
-3. Warszawa hybrydowo
-4. Gdańsk / Gdynia / Sopot hybrydowo
-
-Preferencja branży (od najlepszej):
-1. Bankowość (ING, Commerzbank, Santander, mBank, PKO, HSBC, BNP Paribas i inne banki)
-2. Fintech (szeroko: PayU, Revolut, Stripe, payments, neobank, crypto)
-2. Healthcare (zdrowie, medtech, pharma, biotech)
-3. Inne branże
-
-Preferencja kontraktu: B2B+UoP (oba dostępne) lub samo B2B preferowane nad samym UoP
-"""
 
 # ── Reguły rynku IT PL (fallback bez Claude) ──────────────────────────────────
 
@@ -73,7 +50,7 @@ _COMPANY_PREMIUM = {
     "orange": 1.05, "t-mobile": 1.05,
 }
 
-# Słowa kluczowe podpowiadające empahsis CV
+# Słowa kluczowe podpowiadające emphasis CV
 _EMPHASIS_KEYWORDS = {
     "network":    ["network", "cisco", "palo alto", "noc", "soc", "routing", "switching", "firewall"],
     "devops":     ["devops", "kubernetes", "docker", "ci/cd", "aws", "gcp", "azure", "terraform", "cloud"],
@@ -148,10 +125,6 @@ def _location_score(location: str) -> int:
 
 
 def _sector_score(company: str, description: str = "") -> int:
-    """
-    Punkty za branżę (w rule-based banking i fintech/healthcare = +1 każdy).
-    Claude prompt różnicuje dokładniej: bank +2, fintech/healthcare +1.
-    """
     text = (company + " " + description).lower()
     if any(k in text for k in _BANKING_KW | _FINTECH_KW | _HEALTHCARE_KW):
         return 1
@@ -159,9 +132,6 @@ def _sector_score(company: str, description: str = "") -> int:
 
 
 def _contract_score(offer: dict) -> int:
-    """
-    +1 jeśli oferta zawiera B2B (kandydat preferuje B2B lub B2B+UoP nad samym UoP).
-    """
     salary = (offer.get("salary", "") or "").lower()
     contract = (offer.get("salary_contract", "") or "").lower()
     if "b2b" in salary or "b2b" in contract:
@@ -169,41 +139,73 @@ def _contract_score(offer: dict) -> int:
     return 0
 
 
-def _rule_score(offer: dict) -> tuple[int, str]:
-    """Scoring regułowy (fallback bez Claude). Baza 3 pkt, max 10."""
+def _rule_score(offer: dict) -> dict:
+    """
+    Fallback scoring bez Claude.
+    Produkuje dimensions (aproksymowane) i przechodzi przez compute_final_score,
+    tak by struktura danych była identyczna z trybem Claude.
+    """
     title    = offer.get("title", "").lower()
     company  = offer.get("company", "")
     location = offer.get("location", "")
     desc     = offer.get("description", "") or ""
-    score    = 3  # baza niższa niż 5 – by lokalizacja i stanowisko mogły się różnicować
+    text_all = (title + " " + desc).lower()
 
-    # Stanowisko: Chapter Lead > Manager > Product Owner/Manager
+    # people_leadership_fit – dopasowanie stanowiska przywódczego
     if "chapter lead" in title:
-        score += 3
+        plf = 9
     elif any(k in title for k in [
         "engineering manager", "it manager", "it operations manager",
         "service delivery manager", "noc manager",
     ]):
-        score += 2
+        plf = 7
     elif any(k in title for k in ["product owner", "product manager", "technical product owner"]):
-        score += 1
+        plf = 5
+    else:
+        plf = 3
 
-    # Lokalizacja wg priorytetu kandydata
-    score += _location_score(location)
+    # role_seniority_fit
+    rsf = 7 if "senior" in title else 5
 
-    # Sektor: bankowość > fintech/healthcare > reszta
-    score += _sector_score(company, desc)
+    # product_agile_fit
+    product_kw = ["product", "agile", "scrum", "backlog", "roadmap", "sprint", "kanban"]
+    paf = 7 if any(k in text_all for k in product_kw) else 4
 
-    # Kontrakt: B2B dostępny = +1
-    score += _contract_score(offer)
+    # technical_credibility_fit – neutralne bez pełnego opisu
+    tcf = 5
 
-    # Senior = +1
-    if "senior" in title:
-        score += 1
+    # growth_learning_fit – neutralne
+    glf = 5
 
-    score = min(max(score, 1), 10)
-    reason = "Dopasowanie regułowe (brak klucza Claude API)"
-    return score, reason
+    # conditions_fit – z lokalizacji i kontraktu
+    loc_map = {3: 8, 2: 7, 1: 6, 0: 5, -1: 3}
+    cf = loc_map.get(_location_score(location), 5)
+    if _contract_score(offer):
+        cf = min(cf + 1, 10)
+
+    dimensions = {
+        "people_leadership_fit":    plf,
+        "role_seniority_fit":       rsf,
+        "product_agile_fit":        paf,
+        "technical_credibility_fit": tcf,
+        "growth_learning_fit":      glf,
+        "conditions_fit":           cf,
+    }
+
+    result = {
+        "dimensions":                  dimensions,
+        "stretch_flag_line_management": False,
+        "stretch_flag_english_c1":      False,
+        "booster_domain":               _sector_score(company, desc) > 0,
+        "booster_ai":                   any(k in text_all for k in [
+                                            "artificial intelligence", " ai ", "machine learning",
+                                            "generative", "llm",
+                                        ]),
+        "key_gaps":                     [],
+        "match_reason":                 "Dopasowanie regułowe (brak klucza Claude API)",
+        "cv_emphasis":                  _rule_emphasis(offer),
+    }
+    return compute_final_score(result)
 
 
 # ── Prompty Claude ─────────────────────────────────────────────────────────────
@@ -231,11 +233,16 @@ Bazuj na aktualnych realiach rynku IT w Polsce (2024-2025).
 Dla Chapter Lead / IT Manager / Engineering Manager senior poziom to zazwyczaj 18 000–35 000 PLN UoP.
 """
 
-ANALYSIS_PROMPT = """Jesteś doświadczonym rekruterem IT w Polsce.
+ANALYSIS_PROMPT = """Jesteś doświadczonym rekruterem IT w Polsce. Oceń dopasowanie kandydata do oferty z perspektywy PRACODAWCY – co oferta faktycznie wymaga, a co kandydat udokumentował (nie deklarowana otwartość).
 
-Przeanalizuj dopasowanie oferty do profilu kandydata.
+Zasady oceniania:
+- Rozróżniaj nieformalny wpływ na zespół (agile lead, PO, stakeholder mgmt) od formalnego line managementu (zatrudnianie/zwalnianie, oceny pracownicze, bezpośrednia odpowiedzialność HR). Jeśli oferta wymaga formalnego line managementu, ustaw stretch_flag_line_management=true.
+- Jeśli oferta wymaga angielskiego C1/C2, a kandydat ma B2, ustaw stretch_flag_english_c1=true.
+- Brak dopasowania domenowego NIE dyskwalifikuje – ustaw booster_domain=false, ale nie karać innych wymiarów tylko za domenę.
+- booster_domain=true gdy firma/rola jest blisko domeny networking/infrastruktury kandydata.
+- booster_ai=true gdy oferta zawiera istotny komponent AI/ML/GenAI w zakresie obowiązków.
 
-=== PROFIL ===
+=== PROFIL KANDYDATA ===
 {profile}
 
 === OFERTA ===
@@ -246,41 +253,32 @@ Wynagrodzenie: {salary}
 Umiejętności: {skills}
 Opis: {description}
 
-Odpowiedz WYŁĄCZNIE w formacie JSON (bez markdown):
+Odpowiedz WYŁĄCZNIE tym JSON (bez markdown, bez komentarzy):
 {{
-  "score": <1-10>,
-  "verdict": "<APPLY|SKIP>",
-  "match_reason": "<max 2 zdania – dlaczego warto lub nie>",
+  "dimensions": {{
+    "people_leadership_fit": <0-10>,
+    "role_seniority_fit": <0-10>,
+    "product_agile_fit": <0-10>,
+    "technical_credibility_fit": <0-10>,
+    "growth_learning_fit": <0-10>,
+    "conditions_fit": <0-10>
+  }},
+  "stretch_flag_line_management": <true|false>,
+  "stretch_flag_english_c1": <true|false>,
+  "booster_domain": <true|false>,
+  "booster_ai": <true|false>,
+  "key_gaps": ["<luka 1>", "<luka 2>"],
+  "match_reason": "<max 2 zdania>",
   "cv_emphasis": "<network|management|product|devops>"
 }}
 
-APPLY gdy score >= 6.
-Pamiętaj: kandydat odpadł w Commerzbank bo był "zbyt sieciowy" – przy ofertach management/product nie przesadzaj z sieciowym profilem.
-
-PRIORYTETY PUNKTACJI – nałóż korektę na bazowy score dopasowania kandydata:
-
-Stanowisko:
-  Chapter Lead → +2 pkt
-  Engineering/IT/IT Operations/Service Delivery/NOC Manager → +1 pkt
-  Product Owner / Product Manager → bez korekty
-
-Lokalizacja:
-  Łódź hybrydowo lub stacjonarnie → +2 pkt
-  Full remote (worldwide, anywhere) → +1 pkt
-  Warszawa hybrydowo → bez korekty
-  Gdańsk / Gdynia / Sopot hybrydowo → -1 pkt
-
-Branża/sektor:
-  Bankowość (bank w nazwie firmy: ING, Commerzbank, Santander, mBank, PKO, HSBC, BNP…) → +2 pkt
-  Fintech (PayU, Revolut, Stripe, payments, neobank, blockchain…) → +1 pkt
-  Healthcare (health, medical, pharma, biotech, medtech…) → +1 pkt
-  Inne → bez korekty
-
-Kontrakt:
-  B2B dostępne (samo B2B lub B2B+UoP) → +1 pkt
-  Tylko UoP → bez korekty
-
-Wynik końcowy: 1–10.
+Wskazówki do wymiarów (skala 0-10, oceniaj z perspektywy wymagań oferty vs udokumentowanych osiągnięć kandydata):
+- people_leadership_fit: dopasowanie doświadczenia przywódczego do wymaganego przez ofertę
+- role_seniority_fit: dopasowanie poziomu seniorności i zakresu odpowiedzialności
+- product_agile_fit: dopasowanie doświadczenia product/agile do wymagań oferty
+- technical_credibility_fit: wiarygodność techniczna wymagana przez ofertę vs posiadana
+- growth_learning_fit: potencjał wzrostu i uczenia się w kontekście tej roli
+- conditions_fit: lokalizacja, forma zatrudnienia, wynagrodzenie
 """
 
 
@@ -389,20 +387,15 @@ def analyze_offer(offer: dict) -> dict:
             skills=", ".join(offer.get("skills", [])) or "brak danych",
             description=(offer.get("description", "") or "")[:2000],
         )
-        result = _call_claude(prompt, max_tokens=500)
-        if result:
-            return {**offer, **result}
+        result = _call_claude(prompt, max_tokens=700)
+        if result and "dimensions" in result:
+            scored = compute_final_score(result)
+            return {**offer, **scored}
+        logger.warning(f"[ANALYZER] brak dimensions w odpowiedzi Claude dla: {offer.get('title')}")
 
     # Fallback – scoring regułowy
-    score, reason = _rule_score(offer)
-    return {
-        **offer,
-        "score": score,
-        "verdict": "APPLY" if score >= 6 else "SKIP",
-        "match_reason": reason,
-        "cv_emphasis": _rule_emphasis(offer),
-        "cover_note": "",
-    }
+    scored = _rule_score(offer)
+    return {**offer, **scored}
 
 
 def _extract_salary_nums(text: str) -> list[int]:
