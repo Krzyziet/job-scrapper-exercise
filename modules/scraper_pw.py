@@ -1,6 +1,6 @@
 """
 Playwright-based scrapers dla portali SPA:
-  - JustJoinIT  (li[data-index] DOM)
+  - JustJoinIT  (REST API + detail page dla opisu)
   - NoFluffJobs (DOM fallback)
   - Pracuj.pl   (dehydratedState + [data-test='default-offer'] DOM)
 """
@@ -10,9 +10,13 @@ import logging
 import re
 import time
 
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, Browser, BrowserContext
 
 logger = logging.getLogger(__name__)
+
+DESC_MAX_CHARS   = 2_500
+_JJIT_API_BASE   = "https://justjoin.it/api/candidate-api/offers"
 
 ROLES = [
     "Product Owner", "Technical Product Owner", "Chapter Lead",
@@ -102,6 +106,72 @@ JJIT_SEARCH_TERMS = [
 ]
 
 
+def _jjit_clean_text(html_or_text: str) -> str:
+    """Usuwa HTML, zwija białe znaki, przycina do DESC_MAX_CHARS."""
+    text = BeautifulSoup(html_or_text or "", "html.parser").get_text(separator=" ")
+    return re.sub(r"\s+", " ", text).strip()[:DESC_MAX_CHARS]
+
+
+def _jjit_fetch_list_page(page, term: str, cursor: int | None) -> dict | None:
+    """Pobiera jedną stronę listy ofert z REST API."""
+    url = (
+        f"{_JJIT_API_BASE}"
+        f"?keywords={term.replace(' ', '+')}&keywordType=any&pageSize=20"
+        + (f"&from={cursor}" if cursor is not None else "")
+    )
+    try:
+        resp = page.goto(url, timeout=20_000, wait_until="domcontentloaded")
+        if resp and resp.status == 200:
+            return resp.json()
+        logger.warning(f"[JJIT] lista HTTP {resp.status if resp else '?'}  {url}")
+    except Exception as e:
+        logger.warning(f"[JJIT] lista błąd '{term}': {e}")
+    return None
+
+
+def _jjit_fetch_description(page, slug: str, offer_url: str) -> str:
+    """
+    Pobiera opis oferty (czysty tekst, max DESC_MAX_CHARS).
+    Próba 1: GET /api/candidate-api/offers/{slug} – pole body.
+    Próba 2: DOM strony oferty – div[data-testid*=description] lub główna sekcja treści.
+    """
+    # Próba 1: detail endpoint API
+    try:
+        resp = page.goto(
+            f"{_JJIT_API_BASE}/{slug}",
+            timeout=15_000, wait_until="domcontentloaded",
+        )
+        if resp and resp.status == 200:
+            data = resp.json()
+            body = data.get("body") or data.get("description") or ""
+            if body:
+                return _jjit_clean_text(body)
+    except Exception as e:
+        logger.debug(f"[JJIT] detail API błąd ({slug}): {e}")
+
+    # Próba 2: DOM strony oferty
+    try:
+        page.goto(offer_url, timeout=20_000, wait_until="domcontentloaded")
+        page.wait_for_timeout(2_000)
+        soup = BeautifulSoup(page.content(), "html.parser")
+        # Szukamy kontenera z opisem po kolejności preferencji
+        el = (
+            soup.find(attrs={"data-testid": re.compile(r"job.desc|description", re.I)})
+            or soup.find("div", class_=re.compile(r"JobDescription|job-desc|offer-desc", re.I))
+            or soup.find("section", class_=re.compile(r"description|content", re.I))
+        )
+        if el:
+            return _jjit_clean_text(el.get_text(separator=" "))
+        # Ostateczny fallback: sekcja main z największą ilością tekstu
+        main = soup.find("main") or soup.find("article")
+        if main:
+            return _jjit_clean_text(main.get_text(separator=" "))
+    except Exception as e:
+        logger.debug(f"[JJIT] DOM detail błąd ({offer_url}): {e}")
+
+    return ""
+
+
 def _jjit_parse_item(texts: list[str], href: str) -> dict | None:
     """Parsuje listę tekstów z li[data-index] → oferta lub None."""
     # Znajdź tytuł przez dopasowanie roli
@@ -145,49 +215,103 @@ def _jjit_parse_item(texts: list[str], href: str) -> dict | None:
 
 def scrape_justjoinit() -> list[dict]:
     all_results: list[dict] = []
-    seen_urls: set[str] = set()
+    seen_urls:   set[str]   = set()
 
     with sync_playwright() as pw:
         browser, ctx = _make_browser(pw)
         page = ctx.new_page()
 
+        # ── Faza 1: lista przez REST API ─────────────────────────────────────
+        candidates: list[dict] = []
         for term in JJIT_SEARCH_TERMS:
-            url = f"https://justjoin.it/job-offers?keyword={term.replace(' ', '+')}&remote=true"
-            try:
-                page.goto(url, timeout=30_000, wait_until="domcontentloaded")
-                page.wait_for_timeout(5_000)
-            except Exception as e:
-                logger.warning(f"[JustJoinIT] goto błąd dla '{term}': {e}")
-                continue
+            cursor = None
+            while True:
+                raw = _jjit_fetch_list_page(page, term, cursor)
+                if not raw:
+                    break
+                items     = raw.get("data", [])
+                meta      = raw.get("meta", {})
+                total_int = meta.get("totalItems") or 0
 
-            items = page.query_selector_all("li[data-index]")
-            logger.debug(f"[JustJoinIT] '{term}': {len(items)} li[data-index]")
-
-            for item in items:
-                try:
-                    link = item.query_selector("a[href*='job-offer']")
-                    href = link.get_attribute("href") if link else ""
-                    if not href:
+                new_this_page = 0
+                for item in items:
+                    if not isinstance(item, dict):
                         continue
+                    slug = item.get("slug") or item.get("guid") or ""
+                    if not slug:
+                        continue
+                    offer_url = f"https://justjoin.it/job-offer/{slug}"
+                    if offer_url in seen_urls:
+                        continue
+                    seen_urls.add(offer_url)
+                    new_this_page += 1
 
-                    # Zbierz wszystkie teksty z elementu
-                    from bs4 import BeautifulSoup
-                    html = item.inner_html()
-                    soup = BeautifulSoup(html, "html.parser")
-                    texts = [t.strip() for t in soup.stripped_strings if t.strip()]
+                    title    = item.get("title") or ""
+                    city     = item.get("city") or ""
+                    wp       = item.get("workplaceType") or ""
+                    location = f"{city} ({wp})" if city and wp else (city or wp)
 
-                    offer = _jjit_parse_item(texts, href)
-                    if offer and offer["url"] not in seen_urls:
-                        seen_urls.add(offer["url"])
-                        all_results.append(offer)
-                except Exception as e:
-                    logger.debug(f"[JustJoinIT] błąd parsowania item: {e}")
+                    # Skills dostępne w liście – bez dodatkowych requestów
+                    req  = [s.get("name") if isinstance(s, dict) else s
+                            for s in (item.get("requiredSkills") or [])]
+                    nice = [s.get("name") if isinstance(s, dict) else s
+                            for s in (item.get("niceToHaveSkills") or [])]
+                    skills = [str(s) for s in req + nice if s]
 
-            time.sleep(1)
+                    candidates.append({
+                        "_slug":       slug,
+                        "source":      "JustJoinIT",
+                        "title":       title,
+                        "company":     item.get("companyName") or "",
+                        "location":    location,
+                        "salary":      "",
+                        "salary_from": 0,
+                        "url":         offer_url,
+                        "skills":      skills,
+                        "description": "",
+                    })
+
+                cursor = (meta.get("next") or {}).get("cursor")
+                if (new_this_page == 0
+                        or cursor is None
+                        or (total_int and cursor >= total_int)):
+                    break
+                time.sleep(0.3)
+
+        logger.info(f"[JustJoinIT] {len(candidates)} ofert z listy API")
+
+        # ── Faza 2: opis tylko dla ofert po filtrze tytułu + lokalizacji ─────
+        to_enrich = [
+            o for o in candidates
+            if _matches_role(o["title"]) and _matches_location(o["location"])
+        ]
+        logger.info(f"[JustJoinIT] pobieranie opisów dla {len(to_enrich)} "
+                    f"(po filtrze tytułu+lokalizacji)")
+
+        for i, offer in enumerate(to_enrich, 1):
+            slug = offer.pop("_slug")
+            try:
+                desc = _jjit_fetch_description(page, slug, offer["url"])
+                offer["description"] = desc
+                logger.debug(
+                    f"[JJIT desc] {i}/{len(to_enrich)}  "
+                    f"{'OK ' + str(len(desc)) + 'zn.' if desc else 'brak'}  "
+                    f"– {offer['title']} @ {offer['company']}"
+                )
+            except Exception as e:
+                logger.debug(f"[JJIT desc] błąd {offer['url']}: {e}")
+            time.sleep(0.5)
+
+        # Usuń _slug z ofert, które nie były enrichowane
+        for o in candidates:
+            o.pop("_slug", None)
+
+        # Zwróć oferty które przeszły filtr tytułu (opis może być "")
+        all_results = [o for o in candidates if _matches_role(o["title"])]
 
         browser.close()
 
-    logger.info(f"[JustJoinIT] {len(all_results)} ofert")
+    logger.info(f"[JustJoinIT] {len(all_results)} ofert łącznie")
     return all_results
 
 

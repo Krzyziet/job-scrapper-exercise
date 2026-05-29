@@ -236,11 +236,14 @@ Dla Chapter Lead / IT Manager / Engineering Manager senior poziom to zazwyczaj 1
 ANALYSIS_PROMPT = """Jesteś doświadczonym rekruterem IT w Polsce. Oceń dopasowanie kandydata do oferty z perspektywy PRACODAWCY – co oferta faktycznie wymaga, a co kandydat udokumentował (nie deklarowana otwartość).
 
 Zasady oceniania:
-- Rozróżniaj nieformalny wpływ na zespół (agile lead, PO, stakeholder mgmt) od formalnego line managementu (zatrudnianie/zwalnianie, oceny pracownicze, bezpośrednia odpowiedzialność HR). Jeśli oferta wymaga formalnego line managementu, ustaw stretch_flag_line_management=true.
-- Jeśli oferta wymaga angielskiego C1/C2, a kandydat ma B2, ustaw stretch_flag_english_c1=true.
-- Brak dopasowania domenowego NIE dyskwalifikuje – ustaw booster_domain=false, ale nie karać innych wymiarów tylko za domenę.
+- KLUCZOWE: oceny per wymiar muszą wynikać z TREŚCI OPISU OFERTY (sekcja Opis poniżej), a nie tylko z tytułu. Tytuł to tylko sygnał wstępny.
+- Jeśli opis wskazuje profil inny niż kandydata (np. tytuł "Chapter Lead" ale opis wymaga głównie DevOps/cloud/Kubernetes, a kandydat ma doświadczenie sieciowe i product), obniż odpowiednio technical_credibility_fit i role_seniority_fit i wpisz konkretną lukę w key_gaps.
+- Jeśli opis jest pusty lub bardzo krótki: oceniaj na podstawie tytułu i umiejętności, wpisz "brak opisu oferty" w key_gaps.
+- Rozróżniaj nieformalny wpływ na zespół (agile lead, PO, stakeholder mgmt) od formalnego line managementu (zatrudnianie/zwalnianie, oceny, bezpośrednia odpowiedzialność HR). Jeśli opis wymaga formalnego line managementu, ustaw stretch_flag_line_management=true.
+- Jeśli opis wymaga angielskiego C1/C2, a kandydat ma B2, ustaw stretch_flag_english_c1=true.
+- Brak dopasowania domenowego NIE dyskwalifikuje – ustaw booster_domain=false, ale nie karz innych wymiarów tylko za domenę.
 - booster_domain=true gdy firma/rola jest blisko domeny networking/infrastruktury kandydata.
-- booster_ai=true gdy oferta zawiera istotny komponent AI/ML/GenAI w zakresie obowiązków.
+- booster_ai=true gdy opis zawiera istotny komponent AI/ML/GenAI w zakresie obowiązków.
 
 === PROFIL KANDYDATA ===
 {profile}
@@ -250,7 +253,7 @@ Tytuł: {title}
 Firma: {company}
 Lokalizacja: {location}
 Wynagrodzenie: {salary}
-Umiejętności: {skills}
+Umiejętności wymagane: {skills}
 Opis: {description}
 
 Odpowiedz WYŁĄCZNIE tym JSON (bez markdown, bez komentarzy):
@@ -272,12 +275,12 @@ Odpowiedz WYŁĄCZNIE tym JSON (bez markdown, bez komentarzy):
   "cv_emphasis": "<network|management|product|devops>"
 }}
 
-Wskazówki do wymiarów (skala 0-10, oceniaj z perspektywy wymagań oferty vs udokumentowanych osiągnięć kandydata):
-- people_leadership_fit: dopasowanie doświadczenia przywódczego do wymaganego przez ofertę
-- role_seniority_fit: dopasowanie poziomu seniorności i zakresu odpowiedzialności
-- product_agile_fit: dopasowanie doświadczenia product/agile do wymagań oferty
-- technical_credibility_fit: wiarygodność techniczna wymagana przez ofertę vs posiadana
-- growth_learning_fit: potencjał wzrostu i uczenia się w kontekście tej roli
+Wskazówki do wymiarów (skala 0-10, oceniaj z perspektywy wymagań OPISU oferty vs udokumentowanych osiągnięć kandydata):
+- people_leadership_fit: dopasowanie doświadczenia przywódczego kandydata do tego, czego wymaga opis
+- role_seniority_fit: dopasowanie poziomu seniorności i zakresu odpowiedzialności opisanych w ofercie
+- product_agile_fit: dopasowanie doświadczenia product/agile do wymagań z opisu
+- technical_credibility_fit: wiarygodność techniczna – czy kandydat ma technologie/domeny wymienione w opisie
+- growth_learning_fit: potencjał wzrostu kandydata w kontekście tej konkretnej roli
 - conditions_fit: lokalizacja, forma zatrudnienia, wynagrodzenie
 """
 
@@ -385,7 +388,7 @@ def analyze_offer(offer: dict) -> dict:
             location=offer.get("location", ""),
             salary=salary_display,
             skills=", ".join(offer.get("skills", [])) or "brak danych",
-            description=(offer.get("description", "") or "")[:2000],
+            description=(offer.get("description", "") or "")[:2500],
         )
         result = _call_claude(prompt, max_tokens=700)
         if result and "dimensions" in result:

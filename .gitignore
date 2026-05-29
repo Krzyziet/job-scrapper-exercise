@@ -1,4 +1,5 @@
 results/
+debug/
 githubs-sa-key.json
 .env
 .env.example

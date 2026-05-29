@@ -52,6 +52,17 @@ def _build_html(offers: list[dict], total_scraped: int, run_date: str) -> str:
         emphasis = o.get("cv_emphasis") or "—"
         url      = o.get("url", "")
         style    = ' style="opacity:.55"' if dimmed else ""
+        desc_raw = (o.get("description") or "").strip()
+        desc_preview = (desc_raw[:250] + "…") if len(desc_raw) > 250 else desc_raw
+        desc_row = ""
+        if desc_preview:
+            desc_row = f"""
+        <tr{style}>
+          <td colspan="7" style="padding:2px 8px 8px 36px;font-size:.8em;color:#666;
+                                  border-bottom:1px solid #e0e0e0">
+            📋 {desc_preview}
+          </td>
+        </tr>"""
         return f"""
         <tr{style}>
           <td style="text-align:center;font-size:1.1em">{emoji} <strong>{score}</strong></td>
@@ -63,7 +74,7 @@ def _build_html(offers: list[dict], total_scraped: int, run_date: str) -> str:
           <td>{salary}</td>
           <td style="color:#555;font-size:.85em">{reason}</td>
           <td style="text-align:center;font-size:.85em">{emphasis}</td>
-        </tr>"""
+        </tr>{desc_row}"""
 
     rows = "".join(_row(o) for o in apply_offers)
     if skip_offers:

@@ -153,6 +153,7 @@ def _save_xlsx(offers: list[dict], path: Path) -> None:
         ("Źródło",                  13),
         ("Akcent CV",               12),
         ("Powód dopasowania",       42),
+        ("Opis oferty",             70),
         ("URL oferty",              50),
         ("Strona kariery firmy",    40),
     ]
@@ -175,6 +176,8 @@ def _save_xlsx(offers: list[dict], path: Path) -> None:
         company     = o.get("company", "")
         company_url = get_company_url(company)
 
+        desc_cell = (o.get("description") or "")[:500]
+
         values = [
             score,
             o.get("verdict", ""),
@@ -186,6 +189,7 @@ def _save_xlsx(offers: list[dict], path: Path) -> None:
             o.get("source", ""),
             o.get("cv_emphasis", ""),
             o.get("match_reason", ""),
+            desc_cell,
             offer_url,
             company_url,
         ]
@@ -203,21 +207,21 @@ def _save_xlsx(offers: list[dict], path: Path) -> None:
                 color=("00AA44" if score >= 8 else "FFA000" if score >= 6 else "888888"),
             )
 
-        # URL oferty – klikalne hiperłącze
+        # URL oferty – klikalne hiperłącze (kolumna 12 po dodaniu Opis)
         if offer_url:
-            c = ws.cell(row=row_idx, column=11)
+            c = ws.cell(row=row_idx, column=12)
             c.hyperlink = offer_url
             c.value     = offer_url
             c.font      = url_font
 
-        # Strona kariery – klikalne hiperłącze (jeśli znana)
+        # Strona kariery – klikalne hiperłącze (kolumna 13)
         if company_url:
-            c = ws.cell(row=row_idx, column=12)
+            c = ws.cell(row=row_idx, column=13)
             c.hyperlink = company_url
             c.value     = company_url
             c.font      = url_font
 
-        ws.row_dimensions[row_idx].height = 28
+        ws.row_dimensions[row_idx].height = 60 if desc_cell else 28
 
     # ── Autofiltr ──────────────────────────────────────────────────────────────
     ws.auto_filter.ref = f"A1:{get_column_letter(len(COLS))}1"
