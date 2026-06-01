@@ -282,7 +282,7 @@ def _jjit_lines(elems: list) -> list[str]:
     return lines
 
 
-def _jjit_clean_description(html: str) -> str:
+def _clean_html_description(html: str) -> str:
     if not html:
         return ""
     soup = BeautifulSoup(html, "html.parser")
@@ -395,7 +395,7 @@ def _jjit_get_desc(session: requests.Session, slug: str) -> str:
             r = session.get(f"{_JJIT_API}/{slug}", timeout=15)
             r.raise_for_status()
             body = r.json().get("body") or r.json().get("description") or ""
-            return _jjit_clean_description(body)
+            return _clean_html_description(body)
         except Exception as e:
             if attempt == 0:
                 logger.debug(f"[JJIT] opis próba 1 nieudana ({slug}): {e} – retry")
@@ -1182,7 +1182,7 @@ def scrape_remoteok() -> list[dict]:
                     if sal_max
                     else f"od {sal_min:,} USD/yr"
                 )
-            desc = _jjit_clean_description(job.get("description") or "")
+            desc = _clean_html_description(job.get("description") or "")
             results.append({
                 "source": "RemoteOK",
                 "title": title,
