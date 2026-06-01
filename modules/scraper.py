@@ -41,7 +41,10 @@ def _is_recent(date_val, days: int = SCRAPER_DAYS) -> bool:
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     try:
         if isinstance(date_val, (int, float)):
-            dt = datetime.fromtimestamp(float(date_val), tz=timezone.utc)
+            val = float(date_val)
+            if val > 4_102_444_800:   # wartość > rok 2100 → milisekundy
+                val /= 1000
+            dt = datetime.fromtimestamp(val, tz=timezone.utc)
         elif isinstance(date_val, str):
             s = date_val.strip()
             if s.endswith("Z"):
@@ -515,105 +518,229 @@ def scrape_justjoinit() -> list[dict]:
 NFJ_SEARCH = "https://nofluffjobs.com/pl"
 
 
-def _nfj_salary_str(p: dict) -> tuple[str, int, str]:
-    s = p.get("salary") or {}
-    if not s:
-        return "", 0, ""
-    lo = s.get("from") or 0
-    hi = s.get("to") or 0
-    cur = s.get("currency", "PLN")
-    typ = s.get("type", "")
-    period = s.get("period", "")
-    return f"{lo:,}–{hi:,} {cur}/{period} ({typ})", lo, typ
+# ── 2. NoFluffJobs ─────────────────────────────────────────────────────────────
+# REST API /api/posting – Angular SPA, brak __NEXT_DATA__.
+# Session z cookies (odwiedzamy stronę główną) + 0.5s delay między detail requests.
+
+_NFJ_API          = "https://nofluffjobs.com/api/posting"
+_NFJ_PAGE_SIZE    = 20
+_NFJ_DETAIL_DELAY = 0.5   # delay między requestami detail (rate-limiting)
+
+NFJ_SEARCH_TERMS = [
+    "product owner",
+    "chapter lead",
+    "it manager",
+    "engineering manager",
+    "product manager",
+]
 
 
-def _nfj_parse_next_data(html: str) -> list[dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    script = soup.find("script", id="__NEXT_DATA__")
-    if not script:
-        return []
+def _nfj_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": HEADERS["User-Agent"],
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8",
+        "Referer": "https://nofluffjobs.com/pl",
+        "Origin": "https://nofluffjobs.com",
+    })
     try:
-        data = _json.loads(script.string)
-        # Struktura zależy od wersji NFJ – szukamy postings w różnych miejscach
-        page_props = data.get("props", {}).get("pageProps", {})
-        return (
-            page_props.get("dehydratedState", {})
-                      .get("queries", [{}])[0]
-                      .get("state", {})
-                      .get("data", {})
-                      .get("postings", [])
-            or page_props.get("postings", [])
-            or page_props.get("jobs", [])
-        )
-    except Exception as e:
-        logger.warning(f"[NoFluffJobs] błąd __NEXT_DATA__: {e}")
-        return []
+        s.get("https://nofluffjobs.com/pl", timeout=15)
+        time.sleep(1)
+    except Exception:
+        pass
+    return s
+
+
+def _nfj_get_list(session: requests.Session, term: str,
+                  offset: int) -> dict | None:
+    for attempt in range(2):
+        try:
+            r = session.get(
+                _NFJ_API,
+                params={"limit": _NFJ_PAGE_SIZE, "offset": offset,
+                        "jobTitle": term, "regions": "pl"},
+                timeout=20,
+            )
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            if attempt == 0:
+                logger.debug(f"[NFJ] lista próba 1 '{term}' off={offset}: {e} – retry")
+                time.sleep(3)
+            else:
+                logger.warning(f"[NFJ] lista błąd '{term}': {e}")
+    return None
+
+
+def _nfj_get_detail(session: requests.Session, slug: str) -> dict | None:
+    for attempt in range(2):
+        try:
+            r = session.get(f"{_NFJ_API}/{slug}", timeout=20)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            if attempt == 0:
+                logger.debug(f"[NFJ] detail próba 1 ({slug}): {e} – retry")
+                time.sleep(3)
+            else:
+                logger.debug(f"[NFJ] detail błąd ({slug}): {e}")
+    return None
+
+
+def _nfj_salary(p: dict) -> tuple[str, int, str]:
+    s = p.get("salary") or {}
+    sf  = int(s.get("from") or 0)
+    st  = int(s.get("to")   or 0)
+    cur = s.get("currency", "PLN") or "PLN"
+    typ = s.get("type", "") or ""
+    if not sf:
+        return "", 0, ""
+    sal = f"{sf:,}–{st:,} {cur}/mies. ({typ})" if st else f"od {sf:,} {cur}/mies. ({typ})"
+    return sal, sf, typ
+
+
+_NFJ_SKIP_CITIES = {"remote", "worldwide", "anywhere", "global"}
+
+def _nfj_location(p: dict) -> str:
+    loc    = p.get("location") or {}
+    places = loc.get("places", []) if isinstance(loc, dict) else []
+    cities = [
+        pl.get("city", "") for pl in places
+        if pl.get("city") and pl["city"].lower() not in _NFJ_SKIP_CITIES
+    ]
+    fully_remote = loc.get("fullyRemote") or p.get("fullyRemote") or False
+    city_str = ", ".join(cities) if cities else ""
+    if fully_remote:
+        return f"{city_str} (remote)".strip() if city_str else "remote"
+    return city_str or "remote"
+
+
+def _nfj_build_description(detail: dict) -> str:
+    """Buduje opis z ustrukturyzowanego JSON detail API – bez marketingu."""
+    if not detail:
+        return ""
+    req   = detail.get("requirements") or {}
+    specs = detail.get("specs") or {}
+    parts: list[str] = []
+
+    # Tekst wymagań (może mieć intro, ale głównie merytoryczne)
+    desc_text = (req.get("description") or "").strip()
+    if desc_text:
+        parts.append(desc_text)
+
+    # Codzienne zadania
+    daily = specs.get("dailyTasks") or []
+    if daily:
+        parts.append("Obowiązki:")
+        for t in daily[:10]:
+            parts.append(f"• {str(t).strip()}")
+
+    # Wymagane umiejętności
+    musts = [x.get("value", "") for x in (req.get("musts") or []) if x.get("value")]
+    if musts:
+        parts.append("Wymagane: " + ", ".join(musts))
+
+    # Mile widziane
+    nices = [x.get("value", "") for x in (req.get("nices") or []) if x.get("value")]
+    if nices:
+        parts.append("Mile widziane: " + ", ".join(nices))
+
+    # details.quote i benefits są celowo pominięte (marketing)
+
+    result = "\n".join(parts).strip()
+    if len(result) > 1500:
+        cut = result.rfind("\n", 0, 1500)
+        if cut < 1200:
+            cut = result.rfind(" ", 0, 1500)
+        if cut < 1200:
+            cut = 1500
+        result = result[:cut].rstrip()
+    return result
 
 
 def scrape_nofluffjobs() -> list[dict]:
-    results = []
-    session = _make_session("https://nofluffjobs.com")
+    session    = _nfj_session()
+    seen_urls: set[str]   = set()
+    candidates: list[dict] = []
 
-    # Próbujemy kilka formatów URL – NFJ zmieniało strukturę
-    search_urls = [
-        "https://nofluffjobs.com/pl/praca-zdalna/product-owner",
-        "https://nofluffjobs.com/pl/praca-zdalna/project-manager",
-        "https://nofluffjobs.com/pl/praca-zdalna/it-manager",
-        "https://nofluffjobs.com/pl/praca-zdalna/engineering-manager",
-        "https://nofluffjobs.com/pl/praca-zdalna/chapter-lead",
-        # fallback z criteria query
-        "https://nofluffjobs.com/pl?criteria=category%3Dproduct-owner+remote",
-        "https://nofluffjobs.com/pl?criteria=category%3Dit-manager+remote",
+    # ── Faza 1: jeden call – API zwraca całą bazę naraz (ignoruje limit/offset) ──
+    raw = _nfj_get_list(session, "", 0)   # jobTitle="" = wszystkie oferty
+    if not raw:
+        logger.info("[NoFluffJobs] 0 ofert (błąd API)")
+        return []
+
+    postings = raw.get("postings") or []
+    logger.info(f"[NoFluffJobs] {len(postings)} ofert z API – filtrowanie w pamięci")
+
+    for p in postings:
+        if not _is_recent(p.get("posted")):
+            continue
+        if not _matches_role(p.get("title") or ""):
+            continue
+        slug      = p.get("url") or p.get("id") or ""
+        if not slug:
+            continue
+        offer_url = f"https://nofluffjobs.com/pl/job/{slug}"
+        if offer_url in seen_urls:
+            continue
+        seen_urls.add(offer_url)
+
+        sal_str, sal_from, sal_type = _nfj_salary(p)
+        if sal_from and not _salary_in_range(sal_from, sal_type):
+            continue
+
+        tech   = p.get("technology") or ""
+        skills = ([tech] if isinstance(tech, str) and tech
+                  else (tech if isinstance(tech, list) else []))
+
+        candidates.append({
+            "_slug":           slug,
+            "source":          "NoFluffJobs",
+            "title":           p.get("title") or "",
+            "company":         p.get("name") or "",
+            "location":        _nfj_location(p),
+            "salary":          sal_str,
+            "salary_from":     sal_from,
+            "salary_contract": sal_type,
+            "url":             offer_url,
+            "skills":          skills,
+            "description":     "",
+        })
+
+    logger.info(f"[NoFluffJobs] {len(candidates)} ofert po filtrze rola+data+salary")
+
+    # ── Faza 2: opisy dla ofert po filtrze rola + lokalizacja ─────────────────
+    to_enrich = [
+        o for o in candidates
+        if _matches_role(o["title"]) and _matches_location(o["location"])
     ]
+    logger.info(f"[NoFluffJobs] pobieranie opisów dla {len(to_enrich)} ofert")
 
-    seen = set()
-    for url in search_urls:
-        r = _get(url, session=session)
-        if not r:
-            time.sleep(0.8)
+    for i, offer in enumerate(to_enrich, 1):
+        slug   = offer.pop("_slug")
+        detail = _nfj_get_detail(session, slug)
+        offer["description"] = _nfj_build_description(detail)
+        logger.debug(f"[NFJ desc] {i}/{len(to_enrich)} {offer['title']} @ {offer['company']}")
+        time.sleep(_NFJ_DETAIL_DELAY)
+
+    for o in candidates:
+        o.pop("_slug", None)
+
+    # Deduplicate po (company, title) – NFJ ma wiele slug-wariantów na tę samą ofertę
+    seen_ct: set[tuple] = set()
+    all_results: list[dict] = []
+    for o in candidates:
+        if not _matches_role(o["title"]):
             continue
-
-        postings = _nfj_parse_next_data(r.text)
-        if not postings:
-            logger.debug(f"[NoFluffJobs] brak __NEXT_DATA__ dla {url}")
-            time.sleep(0.8)
+        key = (_normalize(o["company"]), _normalize(o["title"]))
+        if key in seen_ct:
             continue
+        seen_ct.add(key)
+        all_results.append(o)
 
-        for p in postings:
-            title = p.get("title", "") or p.get("position", "")
-            if not _matches_role(title):
-                continue
-            slug = p.get("url", "") or p.get("slug", "") or p.get("id", "")
-            offer_url = f"https://nofluffjobs.com/pl/job/{slug}"
-            if offer_url in seen:
-                continue
-            seen.add(offer_url)
-
-            location = p.get("location") or {}
-            places = location.get("places", []) if isinstance(location, dict) else []
-            city = places[0].get("city", "") if places else ""
-            remote = p.get("remote", False) or p.get("fullyRemote", False)
-            loc_str = f"{city} {'remote' if remote else ''}".strip()
-
-            salary_str, salary_from, salary_type = _nfj_salary_str(p)
-            if salary_from and not _salary_in_range(salary_from, salary_type):
-                continue
-
-            results.append({
-                "source": "NoFluffJobs",
-                "title": title,
-                "company": p.get("name", "") or (p.get("company") or {}).get("name", ""),
-                "location": loc_str or "remote",
-                "salary": salary_str,
-                "salary_from": salary_from,
-                "url": offer_url,
-                "skills": p.get("technology", []) or p.get("skills", []),
-                "description": (p.get("requirements") or {}).get("description", "") if isinstance(p.get("requirements"), dict) else "",
-            })
-        time.sleep(1)
-
-    logger.info(f"[NoFluffJobs] {len(results)} ofert")
-    return results
+    logger.info(f"[NoFluffJobs] {len(all_results)} ofert łącznie")
+    return all_results
 
 
 # ── 3. LinkedIn (guest API) ────────────────────────────────────────────────────
@@ -1308,9 +1435,10 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
 
     all_offers: list[dict] = []
 
-    # Scrapery działające bez przeglądarki (w tym JJIT – czysty REST API)
+    # Scrapery działające bez przeglądarki (JJIT i NFJ – czysty REST API)
     scrapers = [
         ("justjoinit",      scrape_justjoinit),
+        ("nofluffjobs",     scrape_nofluffjobs),
         ("linkedin",        scrape_linkedin),
         ("theprotocol",     scrape_theprotocol),
         ("bulldogjob",      scrape_bulldogjob),
@@ -1328,17 +1456,15 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
         except Exception as e:
             logger.error(f"[{key}] krytyczny błąd scrapera: {e}")
 
-    # Scrapery Playwright (SPA / Cloudflare)
-    pw_keys = {"nofluffjobs", "pracuj"}
+    # Scrapery Playwright (Cloudflare – tylko Pracuj.pl)
+    pw_keys = {"pracuj"}
     if any(_wanted(k) for k in pw_keys):
         if _playwright_available():
             from modules.scraper_pw import (
-                scrape_nofluffjobs,
                 scrape_pracuj,
             )
             pw_scrapers = [
-                ("nofluffjobs", scrape_nofluffjobs),
-                ("pracuj",      scrape_pracuj),
+                ("pracuj", scrape_pracuj),
             ]
             for key, fn in pw_scrapers:
                 if not _wanted(key):
@@ -1349,7 +1475,7 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
                 except Exception as e:
                     logger.error(f"[{key}] krytyczny błąd scrapera Playwright: {e}")
         else:
-            logger.warning("[SCRAPER] Playwright niedostępny – pomijam NoFluffJobs, Pracuj.pl")
+            logger.warning("[SCRAPER] Playwright niedostępny – pomijam Pracuj.pl")
 
     all_offers = deduplicate(all_offers)
     logger.info(f"[SCRAPER] łącznie {len(all_offers)} unikalnych ofert")
