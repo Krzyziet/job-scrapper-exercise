@@ -8,7 +8,6 @@ Scraper ofert pracy z portali:
   6. TheProtocol       – __NEXT_DATA__ JSON w HTML
   7. RemoteOK          – publiczne JSON API (oferty zdalne, wynagrodzenie USD)
   8. WeWorkRemotely    – RSS feed (oferty zdalne, wynagrodzenie USD)
-  9. Himalayas         – __NEXT_DATA__ / DOM (oferty zdalne, wynagrodzenie USD)
 """
 
 import re
@@ -1271,96 +1270,6 @@ def scrape_weworkremotely() -> list[dict]:
     logger.info(f"[WeWorkRemotely] {len(results)} ofert")
     return results
 
-
-# ── 9. Himalayas ───────────────────────────────────────────────────────────────
-# himalayas.app – Next.js, oferty zdalne globalnie.
-# Parsuje __NEXT_DATA__ (props.pageProps.jobs), fallback DOM.
-
-HIMALAYAS_BASE = "https://himalayas.app"
-HIMALAYAS_TERMS = [
-    "product owner",
-    "engineering manager",
-    "it manager",
-    "product manager",
-    "chapter lead",
-]
-_HIMALAYAS_API = f"{HIMALAYAS_BASE}/jobs/api"
-
-
-def scrape_himalayas(max_per_term: int = 60) -> list[dict]:
-    """Używa publicznego JSON API himalayas.app/jobs/api z paginacją (max 60/term)."""
-    results = []
-    seen: set[str] = set()
-
-    for term in HIMALAYAS_TERMS:
-        offset = 0
-        limit = 20
-        fetched = 0
-        while fetched < max_per_term:
-            try:
-                r = requests.get(
-                    _HIMALAYAS_API,
-                    params={"q": term, "limit": limit, "offset": offset},
-                    headers=HEADERS,
-                    timeout=20,
-                )
-                r.raise_for_status()
-                data = r.json()
-            except Exception as e:
-                logger.warning(f"[Himalayas] błąd dla '{term}' offset={offset}: {e}")
-                break
-
-            jobs = data.get("jobs", [])
-            if not jobs:
-                break
-
-            for job in jobs:
-                if not _is_recent(job.get("pubDate")):
-                    continue
-                title = job.get("title", "")
-                if not _matches_role(title):
-                    continue
-                company = job.get("companyName", "")
-                guid = job.get("guid", "")
-                app_link = job.get("applicationLink", "")
-                job_url = guid if (guid or "").startswith("http") else app_link
-                if not job_url or job_url in seen:
-                    continue
-                seen.add(job_url)
-                restrictions = job.get("locationRestrictions") or []
-                location = ", ".join(restrictions) if restrictions else "remote"
-                sal_min = job.get("minSalary") or 0
-                sal_max = job.get("maxSalary") or 0
-                cur = job.get("currency", "USD")
-                sal_str = ""
-                if sal_min or sal_max:
-                    sal_str = (
-                        f"{sal_min:,}–{sal_max:,} {cur}/yr"
-                        if sal_max
-                        else f"od {sal_min:,} {cur}/yr"
-                    )
-                results.append({
-                    "source": "Himalayas",
-                    "title": title,
-                    "company": company,
-                    "location": location,
-                    "salary": sal_str,
-                    "salary_from": 0,
-                    "url": job_url,
-                    "skills": [],
-                    "description": (job.get("excerpt", "") or "")[:500],
-                })
-
-            fetched += len(jobs)
-            offset += limit
-            time.sleep(0.8)
-
-        time.sleep(1)
-
-    logger.info(f"[Himalayas] {len(results)} ofert")
-    return results
-
-
 # ── Deduplikacja ───────────────────────────────────────────────────────────────
 
 def _normalize(text: str) -> str:
@@ -1413,7 +1322,6 @@ _PORTAL_ALIASES: dict[str, str] = {
     "bulldogjob":     "bulldogjob",
     "remoteok":       "remoteok",
     "weworkremotely": "weworkremotely",
-    "himalayas":      "himalayas",
 }
 
 
@@ -1429,7 +1337,7 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
     """
     Uruchamia scrapery. portals=None → wszystkie; portals=["jjit"] → tylko JJIT.
     Obsługuje aliasy: jjit/justjoinit, nofluff/nofluffjobs, pracuj, linkedin,
-    theprotocol, bulldogjob, remoteok, weworkremotely, himalayas.
+    theprotocol, bulldogjob, remoteok, weworkremotely.
     """
     # Normalizuj aliasy do zestawu kluczy kanonicznych
     if portals:
@@ -1452,7 +1360,6 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
         ("bulldogjob",      scrape_bulldogjob),
         ("remoteok",        scrape_remoteok),
         ("weworkremotely",  scrape_weworkremotely),
-        ("himalayas",       scrape_himalayas),
     ]
 
     for key, fn in scrapers:
