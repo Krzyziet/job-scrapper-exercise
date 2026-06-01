@@ -1182,6 +1182,7 @@ def scrape_remoteok() -> list[dict]:
                     if sal_max
                     else f"od {sal_min:,} USD/yr"
                 )
+            desc = _jjit_clean_description(job.get("description") or "")
             results.append({
                 "source": "RemoteOK",
                 "title": title,
@@ -1191,7 +1192,7 @@ def scrape_remoteok() -> list[dict]:
                 "salary_from": 0,
                 "url": url,
                 "skills": [t for t in tags_list if isinstance(t, str)],
-                "description": "",
+                "description": desc,
             })
         time.sleep(1)
 
