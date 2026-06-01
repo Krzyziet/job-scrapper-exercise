@@ -1163,7 +1163,7 @@ def scrape_remoteok() -> list[dict]:
                 continue
             if not _is_recent(job.get("epoch") or job.get("date")):
                 continue
-            title = job.get("position", "") or ""
+            title = (job.get("position", "") or "").replace("&amp;", "&").strip()
             if not _matches_role(title):
                 continue
             url = job.get("url", "")
