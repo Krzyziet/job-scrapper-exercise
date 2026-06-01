@@ -1,6 +1,7 @@
 results/
 debug/
-githubs-sa-key.json
+github-sa-key.json
+*-sa-key.json
 .env
 .env.example
 api_key.env
