@@ -674,6 +674,10 @@ def scrape_nofluffjobs() -> list[dict]:
     logger.info(f"[NoFluffJobs] {len(postings)} ofert z API – filtrowanie w pamięci")
 
     for p in postings:
+        regions      = p.get("regions") or []
+        fully_remote = (p.get("location") or {}).get("fullyRemote") or False
+        if "pl" not in regions and not fully_remote:
+            continue
         if not _is_recent(p.get("posted")):
             continue
         if not _matches_role(p.get("title") or ""):
@@ -690,9 +694,12 @@ def scrape_nofluffjobs() -> list[dict]:
         if sal_from and not _salary_in_range(sal_from, sal_type):
             continue
 
-        tech   = p.get("technology") or ""
-        skills = ([tech] if isinstance(tech, str) and tech
-                  else (tech if isinstance(tech, list) else []))
+        # Skills z tiles.values (type='requirement') – główne źródło dla ról management
+        tiles  = (p.get("tiles") or {}).get("values") or []
+        skills = [t["value"] for t in tiles if t.get("type") == "requirement" and t.get("value")]
+        if not skills:   # fallback na pole technology (używane dla ról technicznych)
+            tech   = p.get("technology") or ""
+            skills = [tech] if tech else []
 
         candidates.append({
             "_slug":           slug,
