@@ -18,8 +18,45 @@ import requests
 import json as _json
 import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 
 logger = logging.getLogger(__name__)
+
+# ── Filtr dat ──────────────────────────────────────────────────────────────────
+
+SCRAPER_DAYS = 7   # ile dni wstecz pobieramy oferty
+
+
+def _is_recent(date_val, days: int = SCRAPER_DAYS) -> bool:
+    """
+    Zwraca True jeśli data oferty mieści się w ostatnich N dniach.
+    Obsługuje: ISO 8601 string (z 'Z' lub offset), Unix timestamp (int/float),
+               RFC 2822 string (WeWorkRemotely RSS).
+    Przy błędzie parsowania zwraca True (nie filtruje).
+    """
+    if not date_val:
+        return True
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    try:
+        if isinstance(date_val, (int, float)):
+            dt = datetime.fromtimestamp(float(date_val), tz=timezone.utc)
+        elif isinstance(date_val, str):
+            s = date_val.strip()
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            try:
+                dt = datetime.fromisoformat(s)
+            except ValueError:
+                dt = parsedate_to_datetime(s)   # RFC 2822
+        else:
+            return True
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt >= cutoff
+    except Exception:
+        return True
 
 # ── Konfiguracja targetów ──────────────────────────────────────────────────────
 
@@ -131,156 +168,344 @@ def _make_session(base_url: str) -> requests.Session:
 
 
 # ── 1. JustJoinIT ──────────────────────────────────────────────────────────────
-# Oba publiczne API (v1 /api/offers, v2 api.justjoin.it) zwracają 404.
-# Scraping strony Next.js – parsujemy __NEXT_DATA__ lub karty HTML.
+# REST API + równoległe pobieranie opisów (bez Playwright).
 
-JJIT_BASE = "https://justjoin.it"
-JJIT_SEARCH_ROLES = [
-    "product-owner",
-    "project-manager",
-    "it-manager",
-    "engineering-manager",
+_JJIT_API  = "https://justjoin.it/api/candidate-api/offers"
+_JJIT_W    = 8   # równoległe requesty do API opisów
+
+JJIT_SEARCH_TERMS = [
+    "product owner",
+    "chapter lead",
+    "it manager",
+    "engineering manager",
+    "product manager",
 ]
 
+# ── Opis: czyszczenie HTML ────────────────────────────────────────────────────
 
-def _jjit_salary_str(emp_types: list) -> tuple[str, int, str]:
-    if not emp_types:
+_JJIT_DESC_MAX = 1_500
+
+_JJIT_DROP_KW = frozenset({
+    "about us", "who we are", "about the company", "about company",
+    "we offer", "what we offer", "benefits", "perks", "why join",
+    "equal opportunity", "diversity", "what we provide", "our offer",
+    "what do we offer", "what you'll get", "what you get", "what we give",
+    "o nas", "o firmie", "oferujemy", "co oferujemy", "benefity",
+    "co zyskujesz", "dlaczego my", "oferta zawiera", "co ci oferujemy",
+    "nasze benefity", "dla ciebie", "co ci dajemy", "dlaczego warto",
+})
+
+_JJIT_KEEP_KW = frozenset({
+    "requirements", "qualifications", "must have", "nice to have",
+    "what we're looking for", "what we are looking for",
+    "responsibilities", "your role", "what you'll do", "what you will do",
+    "your responsibilities", "key responsibilities", "about the role",
+    "the role", "your mission", "role summary", "the job",
+    "people leadership", "technical leadership", "delivery", "execution",
+    "collaboration", "architecture", "engineering", "leadership",
+    "growth", "mentorship", "management",
+    "wymagania", "obowiązki", "oczekujemy", "szukamy", "twoja rola",
+    "zakres obowiązków", "mile widziane", "czego oczekujemy",
+    "twoje zadania", "co będziesz robić", "wymagane", "oczekiwania",
+    "co robisz", "twoje obowiązki", "twoja misja", "zakres",
+})
+
+
+def _jjit_heading_label(text: str) -> str:
+    t = text.lower().strip().rstrip(":")
+    for kw in _JJIT_DROP_KW:
+        if kw in t:
+            return "drop"
+    for kw in _JJIT_KEEP_KW:
+        if kw in t:
+            return "keep"
+    return "unknown"
+
+
+def _jjit_is_header(el) -> bool:
+    if el.name in ("h1", "h2", "h3", "h4", "h5", "h6"):
+        return True
+    if el.name == "p":
+        kids = [c for c in el.children if str(c).strip()]
+        if (len(kids) == 1 and hasattr(kids[0], "name")
+                and kids[0].name in ("strong", "b")):
+            return True
+        text = el.get_text(strip=True)
+        if (len(text) <= 60 and not any(c in text for c in ".?!")
+                and not text.endswith(",") and len(kids) <= 1):
+            return True
+    return False
+
+
+def _jjit_split_sections(container) -> list[tuple[str, list]]:
+    sections, cur_label, cur_elems = [], "unknown", []
+    for el in container.children:
+        if not hasattr(el, "name") or not el.name:
+            continue
+        if _jjit_is_header(el):
+            if cur_elems:
+                sections.append((cur_label, cur_elems))
+            cur_label = _jjit_heading_label(el.get_text(strip=True))
+            cur_elems = []
+        else:
+            cur_elems.append(el)
+    if cur_elems:
+        sections.append((cur_label, cur_elems))
+    return sections
+
+
+def _jjit_lines(elems: list) -> list[str]:
+    lines = []
+    for el in elems:
+        if not hasattr(el, "name") or not el.name:
+            continue
+        if el.name in ("ul", "ol"):
+            for li in el.find_all("li"):
+                t = re.sub(r"\s+", " ", li.get_text(separator=" ")).strip()
+                if t:
+                    lines.append(f"• {t}")
+        elif el.name == "p":
+            t = re.sub(r"\s+", " ", el.get_text(separator=" ")).strip()
+            if len(t) > 10:
+                lines.append(t)
+        elif el.name in ("div", "section", "article", "span"):
+            lines.extend(_jjit_lines(
+                [c for c in el.children if hasattr(c, "name") and c.name]
+            ))
+        else:
+            t = re.sub(r"\s+", " ", el.get_text(separator=" ")).strip()
+            if len(t) > 10:
+                lines.append(t)
+    return lines
+
+
+def _jjit_clean_description(html: str) -> str:
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    container = soup.find("body") or soup
+    sections = _jjit_split_sections(container)
+    if len(sections) <= 1:
+        wrapper = container.find("div")
+        if wrapper:
+            deeper = _jjit_split_sections(wrapper)
+            if len(deeper) > 1:
+                sections = deeper
+    lines = []
+    for label, elems in sections:
+        if label != "drop":
+            lines.extend(_jjit_lines(elems))
+    result = "\n".join(lines).strip()
+    if len(result) < 100:
+        li_lines = []
+        for label, elems in sections:
+            if label != "drop":
+                for el in elems:
+                    if hasattr(el, "find_all"):
+                        for li in el.find_all("li"):
+                            t = re.sub(r"\s+", " ", li.get_text(separator=" ")).strip()
+                            if t:
+                                li_lines.append(f"• {t}")
+        if li_lines:
+            result = "\n".join(li_lines).strip()
+    if len(result) < 100:
+        result = re.sub(r"\s+", " ", soup.get_text(separator=" ")).strip()
+    if len(result) > _JJIT_DESC_MAX:
+        cut = result.rfind("\n", 0, _JJIT_DESC_MAX)
+        if cut < int(_JJIT_DESC_MAX * 0.75):
+            cut = result.rfind(" ", 0, _JJIT_DESC_MAX)
+        if cut < int(_JJIT_DESC_MAX * 0.75):
+            cut = _JJIT_DESC_MAX
+        result = result[:cut].rstrip()
+    return result
+
+# ── Salary ────────────────────────────────────────────────────────────────────
+
+def _jjit_salary(et_list: list) -> tuple[str, int, str]:
+    if not et_list:
         return "", 0, ""
-    parts, best_from, best_type = [], 0, ""
-    for e in emp_types:
-        s = e.get("salary") or e.get("salaryRange") or {}
-        if not s:
+    original = [et for et in et_list if et.get("currencySource") == "original"] or et_list
+    _PRIO = {"b2b": 0, "b2b_contract": 0, "permanent": 1,
+             "contract_of_employment": 1, "mandate_contract": 2}
+    ordered = sorted(original, key=lambda x: _PRIO.get(x.get("type", ""), 9))
+    for et in ordered:
+        sf = et.get("from") or 0
+        st = et.get("to")   or 0
+        if not sf:
             continue
-        lo = s.get("from") or s.get("min") or 0
-        hi = s.get("to") or s.get("max") or 0
-        cur = s.get("currency", "PLN")
-        typ = e.get("type", "") or e.get("employmentType", "")
-        parts.append(f"{lo:,}–{hi:,} {cur} ({typ})")
-        if lo > best_from:
-            best_from, best_type = lo, typ
-    return ", ".join(parts), best_from, best_type
+        cur   = et.get("currency", "PLN") or "PLN"
+        ctype = et.get("type", "") or ""
+        unit  = (et.get("unit") or "month").lower()
+        if unit in ("hour", "hourly", "h"):
+            sf_h = et.get("fromPerUnit") or 0
+            st_h = et.get("toPerUnit")   or 0
+            note = (f" [{int(sf_h)}–{int(st_h)} {cur}/h]" if sf_h and st_h else
+                    f" [{int(sf_h)} {cur}/h]" if sf_h else "")
+        else:
+            note = ""
+        sf_i = int(sf)
+        st_i = int(st) if st else 0
+        sal  = (f"{sf_i:,}–{st_i:,} {cur}/mies. ({ctype}){note}" if st_i else
+                f"od {sf_i:,} {cur}/mies. ({ctype}){note}")
+        return sal, sf_i, ctype
+    return "", 0, (ordered[0].get("type", "") if ordered else "")
+
+# ── HTTP helpers ──────────────────────────────────────────────────────────────
+
+def _jjit_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8",
+    })
+    return s
 
 
-def _jjit_parse_next_data(html: str) -> list[dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    script = soup.find("script", id="__NEXT_DATA__")
-    if not script:
-        return []
-    try:
-        data = _json.loads(script.string)
-        pp = data.get("props", {}).get("pageProps", {})
-        # Różne klucze w zależności od wersji strony
-        return (
-            pp.get("dehydratedState", {})
-              .get("queries", [{}])[0]
-              .get("state", {}).get("data", {}).get("data", [])
-            or pp.get("offers", [])
-            or pp.get("jobOffers", [])
-            or pp.get("data", {}).get("offers", [])
-        )
-    except Exception as e:
-        logger.debug(f"[JustJoinIT] __NEXT_DATA__ błąd: {e}")
-        return []
+def _jjit_get_list(session: requests.Session, term: str,
+                   cursor: int | None) -> dict | None:
+    url = (
+        f"{_JJIT_API}?keywords={term.replace(' ', '+')}&keywordType=any&pageSize=20"
+        + (f"&from={cursor}" if cursor is not None else "")
+    )
+    for attempt in range(2):
+        try:
+            r = session.get(url, timeout=20)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            if attempt == 0:
+                logger.debug(f"[JJIT] lista próba 1 nieudana '{term}': {e} – retry")
+                time.sleep(2)
+            else:
+                logger.warning(f"[JJIT] lista błąd '{term}': {e}")
+    return None
 
 
-def _jjit_parse_html_cards(html: str) -> list[dict]:
-    """Fallback – parsuje karty ofert z HTML gdy brak __NEXT_DATA__."""
-    soup = BeautifulSoup(html, "html.parser")
-    results = []
-    # JustJoinIT używa data-testid lub klas z "offer"
-    for card in soup.select("[data-testid*='offer-list-item'], article, a[href*='/job-offer/']"):
-        title_el = card.find(["h2", "h3", "h4"])
-        link_el = card if card.name == "a" else card.find("a", href=re.compile(r"/job-offer/|/offers/"))
-        if not title_el or not link_el:
-            continue
-        title = title_el.get_text(strip=True)
-        href = link_el.get("href", "")
-        if href and not href.startswith("http"):
-            href = f"{JJIT_BASE}{href}"
-        company_el = card.find(attrs={"data-testid": re.compile("company|employer", re.I)})
-        results.append({
-            "title": title,
-            "company": company_el.get_text(strip=True) if company_el else "",
-            "url": href,
-        })
-    return results
+def _jjit_get_desc(session: requests.Session, slug: str) -> str:
+    for attempt in range(2):
+        try:
+            r = session.get(f"{_JJIT_API}/{slug}", timeout=15)
+            r.raise_for_status()
+            body = r.json().get("body") or r.json().get("description") or ""
+            return _jjit_clean_description(body)
+        except Exception as e:
+            if attempt == 0:
+                logger.debug(f"[JJIT] opis próba 1 nieudana ({slug}): {e} – retry")
+                time.sleep(2)
+            else:
+                logger.debug(f"[JJIT] opis błąd ({slug}): {e}")
+    return ""
 
+# ── Scraper ───────────────────────────────────────────────────────────────────
 
 def scrape_justjoinit() -> list[dict]:
-    session = _make_session(JJIT_BASE)
-    results = []
-    seen = set()
+    session    = _jjit_session()
+    seen_urls: set[str]   = set()
+    candidates: list[dict] = []
 
-    search_urls = [
-        f"{JJIT_BASE}/job-offers?keyword={role}&remote=true" for role in JJIT_SEARCH_ROLES
-    ] + [
-        f"{JJIT_BASE}/job-offers?keyword={role}&city=lodz" for role in JJIT_SEARCH_ROLES
+    # ── Faza 1: lista ─────────────────────────────────────────────────────────
+    for term in JJIT_SEARCH_TERMS:
+        cursor = None
+        while True:
+            raw = _jjit_get_list(session, term, cursor)
+            if not raw:
+                break
+            items     = raw.get("data", [])
+            meta      = raw.get("meta", {})
+            total_int = meta.get("totalItems") or 0
+            new_n     = 0
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                slug = item.get("slug") or item.get("guid") or ""
+                if not slug:
+                    continue
+                if not _is_recent(item.get("publishedAt")):
+                    continue
+                offer_url = f"https://justjoin.it/job-offer/{slug}"
+                if offer_url in seen_urls:
+                    continue
+                seen_urls.add(offer_url)
+                new_n += 1
+                title = item.get("title") or ""
+                wp    = item.get("workplaceType") or ""
+                # Zbierz WSZYSTKIE miasta z locations[]; fallback na pole city
+                locs       = item.get("locations") or []
+                all_cities = [loc["city"] for loc in locs if loc.get("city")]
+                if not all_cities:
+                    all_cities = [item.get("city") or ""]
+                city_str   = ", ".join(c for c in all_cities if c)
+                location   = f"{city_str} ({wp})" if city_str and wp else (city_str or wp)
+                req  = [s.get("name") if isinstance(s, dict) else s
+                        for s in (item.get("requiredSkills") or [])]
+                nice = [s.get("name") if isinstance(s, dict) else s
+                        for s in (item.get("niceToHaveSkills") or [])]
+                skills = [str(s) for s in req + nice if s]
+                sal_str, sal_from, sal_contract = _jjit_salary(
+                    item.get("employmentTypes") or []
+                )
+                candidates.append({
+                    "_slug":           slug,
+                    "source":          "JustJoinIT",
+                    "title":           title,
+                    "company":         item.get("companyName") or "",
+                    "location":        location,
+                    "salary":          sal_str,
+                    "salary_from":     sal_from,
+                    "salary_contract": sal_contract,
+                    "url":             offer_url,
+                    "skills":          skills,
+                    "description":     "",
+                })
+            cursor = (meta.get("next") or {}).get("cursor")
+            if (new_n == 0 or cursor is None
+                    or (total_int and cursor >= total_int)):
+                break
+            time.sleep(0.3)
+
+    logger.info(f"[JustJoinIT] {len(candidates)} ofert z listy API")
+
+    # ── Faza 2: opisy równolegle ───────────────────────────────────────────────
+    to_enrich = [
+        o for o in candidates
+        if _matches_role(o["title"]) and _matches_location(o["location"])
     ]
+    logger.info(
+        f"[JustJoinIT] pobieranie opisów dla {len(to_enrich)} "
+        f"(po filtrze tytułu+lokalizacji)"
+    )
+    slug_map = {o["url"]: o.pop("_slug") for o in to_enrich}
+    url_to_desc: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=_JJIT_W) as pool:
+        futures = {
+            pool.submit(_jjit_get_desc, session, slug): url
+            for url, slug in slug_map.items()
+        }
+        done = 0
+        for future in as_completed(futures):
+            url = futures[future]
+            done += 1
+            try:
+                url_to_desc[url] = future.result()
+            except Exception as e:
+                url_to_desc[url] = ""
+                logger.debug(f"[JJIT] opis worker błąd: {e}")
+            if done % 50 == 0:
+                logger.info(f"[JustJoinIT] opisy: {done}/{len(slug_map)}")
 
-    for url in search_urls:
-        r = _get(url, session=session)
-        if not r:
-            time.sleep(0.5)
-            continue
+    for o in to_enrich:
+        o["description"] = url_to_desc.get(o["url"], "")
+    for o in candidates:
+        o.pop("_slug", None)
 
-        raw_offers = _jjit_parse_next_data(r.text)
-
-        if raw_offers:
-            for o in raw_offers:
-                title = o.get("title", "") or o.get("position", "")
-                if not _matches_role(title):
-                    continue
-                city = o.get("city", "") or o.get("location", {}).get("city", "") or ""
-                workplace = (o.get("workplaceType", "")
-                             or o.get("workplace_type", "")
-                             or o.get("remoteInterview", ""))
-                loc_str = f"{city} {workplace}".strip()
-                if not _matches_location(loc_str):
-                    continue
-                emp_types = (o.get("employmentTypes", [])
-                             or o.get("employment_types", [])
-                             or o.get("salaryRanges", []))
-                salary_str, salary_from, salary_type = _jjit_salary_str(emp_types)
-                if salary_from and not _salary_in_range(salary_from, salary_type):
-                    continue
-                slug = o.get("slug", "") or o.get("id", "")
-                offer_url = o.get("url", "") or f"{JJIT_BASE}/job-offer/{slug}"
-                if offer_url in seen:
-                    continue
-                seen.add(offer_url)
-                results.append({
-                    "source": "JustJoinIT",
-                    "title": title,
-                    "company": o.get("companyName", "") or o.get("company_name", "") or (o.get("company") or {}).get("name", ""),
-                    "location": loc_str or "remote",
-                    "salary": salary_str,
-                    "salary_from": salary_from,
-                    "url": offer_url,
-                    "skills": [s.get("name", "") for s in (o.get("requiredSkills", []) or o.get("skills", []))],
-                    "description": o.get("body", "") or o.get("description", "") or "",
-                })
-        else:
-            # HTML fallback
-            for card in _jjit_parse_html_cards(r.text):
-                title = card.get("title", "")
-                if not _matches_role(title) or card.get("url") in seen:
-                    continue
-                seen.add(card["url"])
-                results.append({
-                    "source": "JustJoinIT",
-                    "title": title,
-                    "company": card.get("company", ""),
-                    "location": "remote",
-                    "salary": "",
-                    "salary_from": 0,
-                    "url": card["url"],
-                    "skills": [],
-                    "description": "",
-                })
-        time.sleep(1)
-
-    logger.info(f"[JustJoinIT] {len(results)} ofert")
-    return results
+    all_results = [o for o in candidates if _matches_role(o["title"])]
+    logger.info(f"[JustJoinIT] {len(all_results)} ofert łącznie")
+    return all_results
 
 
 # ── 2. NoFluffJobs ─────────────────────────────────────────────────────────────
@@ -802,6 +1027,8 @@ def scrape_remoteok() -> list[dict]:
         for job in data:
             if not isinstance(job, dict) or "id" not in job:
                 continue
+            if not _is_recent(job.get("epoch") or job.get("date")):
+                continue
             title = job.get("position", "") or ""
             if not _matches_role(title):
                 continue
@@ -869,6 +1096,8 @@ def scrape_weworkremotely() -> list[dict]:
             continue
 
         for item in channel.findall("item"):
+            if not _is_recent(item.findtext("pubDate")):
+                continue
             raw_title = item.findtext("title") or ""
             # Format: "Firma: Stanowisko" (company before colon, title after)
             if ": " in raw_title:
@@ -951,6 +1180,8 @@ def scrape_himalayas(max_per_term: int = 60) -> list[dict]:
                 break
 
             for job in jobs:
+                if not _is_recent(job.get("pubDate")):
+                    continue
                 title = job.get("title", "")
                 if not _matches_role(title):
                     continue
@@ -1077,8 +1308,9 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
 
     all_offers: list[dict] = []
 
-    # Scrapery działające bez przeglądarki
+    # Scrapery działające bez przeglądarki (w tym JJIT – czysty REST API)
     scrapers = [
+        ("justjoinit",      scrape_justjoinit),
         ("linkedin",        scrape_linkedin),
         ("theprotocol",     scrape_theprotocol),
         ("bulldogjob",      scrape_bulldogjob),
@@ -1097,16 +1329,14 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
             logger.error(f"[{key}] krytyczny błąd scrapera: {e}")
 
     # Scrapery Playwright (SPA / Cloudflare)
-    pw_keys = {"justjoinit", "nofluffjobs", "pracuj"}
+    pw_keys = {"nofluffjobs", "pracuj"}
     if any(_wanted(k) for k in pw_keys):
         if _playwright_available():
             from modules.scraper_pw import (
-                scrape_justjoinit,
                 scrape_nofluffjobs,
                 scrape_pracuj,
             )
             pw_scrapers = [
-                ("justjoinit", scrape_justjoinit),
                 ("nofluffjobs", scrape_nofluffjobs),
                 ("pracuj",      scrape_pracuj),
             ]
@@ -1119,7 +1349,7 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
                 except Exception as e:
                     logger.error(f"[{key}] krytyczny błąd scrapera Playwright: {e}")
         else:
-            logger.warning("[SCRAPER] Playwright niedostępny – pomijam JustJoinIT, NoFluffJobs, Pracuj.pl")
+            logger.warning("[SCRAPER] Playwright niedostępny – pomijam NoFluffJobs, Pracuj.pl")
 
     all_offers = deduplicate(all_offers)
     logger.info(f"[SCRAPER] łącznie {len(all_offers)} unikalnych ofert")
