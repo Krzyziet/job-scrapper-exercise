@@ -1035,6 +1035,22 @@ def deduplicate(offers: list[dict]) -> list[dict]:
 
 # ── Główny punkt wejścia ───────────────────────────────────────────────────────
 
+# Aliasy nazw portali → klucz kanoniczny
+_PORTAL_ALIASES: dict[str, str] = {
+    "jjit":           "justjoinit",
+    "justjoinit":     "justjoinit",
+    "nofluff":        "nofluffjobs",
+    "nofluffjobs":    "nofluffjobs",
+    "pracuj":         "pracuj",
+    "linkedin":       "linkedin",
+    "theprotocol":    "theprotocol",
+    "bulldogjob":     "bulldogjob",
+    "remoteok":       "remoteok",
+    "weworkremotely": "weworkremotely",
+    "himalayas":      "himalayas",
+}
+
+
 def _playwright_available() -> bool:
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401
@@ -1043,46 +1059,67 @@ def _playwright_available() -> bool:
         return False
 
 
-def scrape_all() -> list[dict]:
+def scrape_all(portals: list[str] | None = None) -> list[dict]:
+    """
+    Uruchamia scrapery. portals=None → wszystkie; portals=["jjit"] → tylko JJIT.
+    Obsługuje aliasy: jjit/justjoinit, nofluff/nofluffjobs, pracuj, linkedin,
+    theprotocol, bulldogjob, remoteok, weworkremotely, himalayas.
+    """
+    # Normalizuj aliasy do zestawu kluczy kanonicznych
+    if portals:
+        want = {_PORTAL_ALIASES.get(p.lower(), p.lower()) for p in portals}
+        logger.info(f"[SCRAPER] Filtr portali: {sorted(want)}")
+    else:
+        want = None  # wszystkie
+
+    def _wanted(key: str) -> bool:
+        return want is None or key in want
+
     all_offers: list[dict] = []
 
     # Scrapery działające bez przeglądarki
     scrapers = [
-        ("LinkedIn",        scrape_linkedin),
-        ("TheProtocol",     scrape_theprotocol),
-        ("Bulldogjob",      scrape_bulldogjob),
-        ("RemoteOK",        scrape_remoteok),
-        ("WeWorkRemotely",  scrape_weworkremotely),
-        ("Himalayas",       scrape_himalayas),
+        ("linkedin",        scrape_linkedin),
+        ("theprotocol",     scrape_theprotocol),
+        ("bulldogjob",      scrape_bulldogjob),
+        ("remoteok",        scrape_remoteok),
+        ("weworkremotely",  scrape_weworkremotely),
+        ("himalayas",       scrape_himalayas),
     ]
 
-    for name, fn in scrapers:
+    for key, fn in scrapers:
+        if not _wanted(key):
+            continue
         try:
             results = fn()
             all_offers.extend(results)
         except Exception as e:
-            logger.error(f"[{name}] krytyczny błąd scrapera: {e}")
+            logger.error(f"[{key}] krytyczny błąd scrapera: {e}")
 
     # Scrapery Playwright (SPA / Cloudflare)
-    if _playwright_available():
-        from modules.scraper_pw import (
-            scrape_justjoinit,
-            scrape_nofluffjobs,
-            scrape_pracuj,
-        )
-        pw_scrapers = [
-            ("JustJoinIT",  scrape_justjoinit),
-            ("NoFluffJobs", scrape_nofluffjobs),
-            ("Pracuj.pl",   scrape_pracuj),
-        ]
-        for name, fn in pw_scrapers:
-            try:
-                results = fn()
-                all_offers.extend(results)
-            except Exception as e:
-                logger.error(f"[{name}] krytyczny błąd scrapera Playwright: {e}")
-    else:
-        logger.warning("[SCRAPER] Playwright niedostępny – pomijam JustJoinIT, NoFluffJobs, Pracuj.pl")
+    pw_keys = {"justjoinit", "nofluffjobs", "pracuj"}
+    if any(_wanted(k) for k in pw_keys):
+        if _playwright_available():
+            from modules.scraper_pw import (
+                scrape_justjoinit,
+                scrape_nofluffjobs,
+                scrape_pracuj,
+            )
+            pw_scrapers = [
+                ("justjoinit", scrape_justjoinit),
+                ("nofluffjobs", scrape_nofluffjobs),
+                ("pracuj",      scrape_pracuj),
+            ]
+            for key, fn in pw_scrapers:
+                if not _wanted(key):
+                    continue
+                try:
+                    results = fn()
+                    all_offers.extend(results)
+                except Exception as e:
+                    logger.error(f"[{key}] krytyczny błąd scrapera Playwright: {e}")
+        else:
+            logger.warning("[SCRAPER] Playwright niedostępny – pomijam JustJoinIT, NoFluffJobs, Pracuj.pl")
 
     all_offers = deduplicate(all_offers)
     logger.info(f"[SCRAPER] łącznie {len(all_offers)} unikalnych ofert")

@@ -51,7 +51,7 @@ RESET  = "\033[0m"
 DIM    = "\033[2m"
 
 
-def _score_color(score: int) -> str:
+def _score_color(score) -> str:
     if score >= 8:
         return GREEN
     if score >= 6:
@@ -59,17 +59,27 @@ def _score_color(score: int) -> str:
     return DIM
 
 
-def _print_offer(idx: int, o: dict, dim: bool = False) -> None:
-    score    = o.get("score", "?")
-    verdict  = o.get("verdict", "?")
-    sc       = _score_color(score) if isinstance(score, int) and not dim else (DIM if dim else "")
-    predicted = " [est.]" if o.get("salary_predicted") else ""
-    emphasis = o.get("cv_emphasis", "—")
-    source   = o.get("source", "—")
-    prefix   = DIM if dim else ""
-    reset_   = RESET
+def _display_score(o: dict) -> str:
+    """Zwraca final_score (float) jeśli dostępny, inaczej score (int)."""
+    fs = o.get("final_score")
+    if fs is not None:
+        return f"{fs:.2f}"
+    s = o.get("score")
+    return str(s) if s is not None else "?"
 
-    print(f"{prefix}{BOLD}#{idx:02d}  {sc}{score}/10{reset_}{prefix}  [{verdict}]  {BOLD if not dim else ''}{o.get('title', '')}{reset_}")
+
+def _print_offer(idx: int, o: dict, dim: bool = False) -> None:
+    score_val = o.get("final_score") if o.get("final_score") is not None else o.get("score", 0)
+    score_str = _display_score(o)
+    verdict   = o.get("verdict", "?")
+    sc        = _score_color(score_val) if not dim else DIM
+    predicted = " [est.]" if o.get("salary_predicted") else ""
+    emphasis  = o.get("cv_emphasis", "—")
+    source    = o.get("source", "—")
+    prefix    = DIM if dim else ""
+    reset_    = RESET
+
+    print(f"{prefix}{BOLD}#{idx:02d}  {sc}{score_str}/10{reset_}{prefix}  [{verdict}]  {BOLD if not dim else ''}{o.get('title', '')}{reset_}")
     print(f"{prefix}      Firma:    {o.get('company', '—')}{reset_}")
     print(f"{prefix}      Lokacja:  {o.get('location', '—')}{reset_}")
     print(f"{prefix}      Zarobki:  {o.get('salary', '—')}{predicted}{reset_}")
@@ -171,7 +181,7 @@ def _save_xlsx(offers: list[dict], path: Path) -> None:
     for row_idx, o in enumerate(offers, 2):
         is_apply    = o.get("verdict") == "APPLY"
         fill        = apply_fill if is_apply else skip_fill
-        score       = o.get("score", "")
+        score       = o.get("final_score") if o.get("final_score") is not None else o.get("score", "")
         offer_url   = o.get("url", "")
         company     = o.get("company", "")
         company_url = get_company_url(company)
@@ -200,8 +210,8 @@ def _save_xlsx(offers: list[dict], path: Path) -> None:
             cell.border    = border
             cell.alignment = center if col_idx in (1, 2, 8, 9) else wrap
 
-        # Score – pogrubiony + kolor tekstu
-        if isinstance(score, int):
+        # Score – pogrubiony + kolor tekstu (działa dla int i float)
+        if isinstance(score, (int, float)):
             ws.cell(row=row_idx, column=1).font = Font(
                 bold=True,
                 color=("00AA44" if score >= 8 else "FFA000" if score >= 6 else "888888"),
@@ -241,19 +251,35 @@ def _check_env():
         print(f"\n{GREEN}[OK] Claude API aktywny – pełna analiza AI{RESET}")
 
 
-def run(no_analyze: bool = False, limit: int = None):
+def _db_available() -> bool:
+    import os
+    return all(os.environ.get(k) for k in ("DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"))
+
+
+def run(no_analyze: bool = False, limit: int = None,
+        portals: list[str] | None = None, ignore_seen: bool = False):
     from modules.scraper import scrape_all
     from modules.analyzer import analyze_all, _normalize_salary_pln
-    from modules.db import init_db, get_known_urls, insert_offers, mark_notified, update_offer_status
 
     _check_env()
     logger.info("=== Job Hunter START ===")
 
-    init_db()
+    # DB – opcjonalne; lokalnie bez Cloud SQL po prostu pomijamy
+    db_ok = _db_available()
+    if db_ok:
+        from modules.db import init_db, get_known_urls, insert_offers, mark_notified, update_offer_status
+        try:
+            init_db()
+        except Exception as e:
+            logger.warning(f"[DB] init_db błąd: {e} – kontynuuję bez DB")
+            db_ok = False
+    else:
+        logger.warning("[DB] Brak kredencjałów DB – kroki DB pominięte")
 
     # 1. Scraping
-    logger.info("Krok 1: Scraping ofert ze wszystkich portali...")
-    offers = scrape_all()
+    portal_info = f" (portal: {portals})" if portals else ""
+    logger.info(f"Krok 1: Scraping ofert{portal_info}...")
+    offers = scrape_all(portals=portals)
 
     if not offers:
         print(f"\n{RED}Brak ofert po scrapingu.{RESET}")
@@ -262,7 +288,11 @@ def run(no_analyze: bool = False, limit: int = None):
     total_scraped = len(offers)
     print(f"\n{GREEN}Pobrano {total_scraped} unikalnych ofert.{RESET}")
 
-    update_offer_status({o.get("url") for o in offers if o.get("url")})
+    if db_ok:
+        try:
+            update_offer_status({o.get("url") for o in offers if o.get("url")})
+        except Exception as e:
+            logger.warning(f"[DB] update_offer_status błąd: {e}")
 
     if limit:
         offers = offers[:limit]
@@ -271,9 +301,20 @@ def run(no_analyze: bool = False, limit: int = None):
     # Normalizacja walut zawsze – niezależnie od trybu
     offers = [_normalize_salary_pln(o) for o in offers]
 
-    known_urls = get_known_urls()
-    new_offers = [o for o in offers if o.get("url") not in known_urls]
-    logger.info(f"Nowe oferty: {len(new_offers)} / {len(offers)} łącznie")
+    if ignore_seen:
+        new_offers = offers
+        logger.info(f"--ignore-seen: analiza wszystkich {len(offers)} ofert (bez filtra known_urls)")
+    elif db_ok:
+        try:
+            known_urls = get_known_urls()
+            new_offers = [o for o in offers if o.get("url") not in known_urls]
+            logger.info(f"Nowe oferty: {len(new_offers)} / {len(offers)} łącznie")
+        except Exception as e:
+            logger.warning(f"[DB] get_known_urls błąd: {e} – traktuję wszystkie jako nowe")
+            new_offers = offers
+    else:
+        new_offers = offers
+        logger.info(f"Brak DB – traktuję wszystkie {len(offers)} ofert jako nowe")
 
     if not new_offers:
         logger.info("Brak nowych ofert – kończę")
@@ -301,7 +342,11 @@ def run(no_analyze: bool = False, limit: int = None):
           f"/  {len(scored)} łącznie po filtrze wynagrodzenia{RESET}")
 
     # 3. Wyniki
-    insert_offers(scored)
+    if db_ok:
+        try:
+            insert_offers(scored)
+        except Exception as e:
+            logger.warning(f"[DB] insert_offers błąd: {e}")
     print_results(scored)
     json_path, xls_path = save_results(scored)
     print(f"{DIM}Wyniki zapisano do: {json_path}{RESET}")
@@ -315,15 +360,28 @@ def run(no_analyze: bool = False, limit: int = None):
     else:
         print(f"{YELLOW}[!] E-mail pominięty – ustaw GMAIL_APP_PASSWORD w .env{RESET}")
 
-    to_notify = [o for o in scored if o.get("verdict") == "APPLY"]
-    mark_notified(to_notify)
+    if db_ok:
+        try:
+            to_notify = [o for o in scored if o.get("verdict") == "APPLY"]
+            mark_notified(to_notify)
+        except Exception as e:
+            logger.warning(f"[DB] mark_notified błąd: {e}")
 
     logger.info(f"=== Job Hunter KONIEC – {apply_count} APPLY / {len(scored)} łącznie ===")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Job Hunter – lokalny scraper ofert")
-    parser.add_argument("--no-analyze", action="store_true", help="Pomiń analizę Claude (tylko scraping)")
-    parser.add_argument("--limit", type=int, default=None, help="Ogranicz liczbę ofert do analizy")
+    parser.add_argument("--no-analyze",   action="store_true", help="Pomiń analizę Claude (tylko scraping)")
+    parser.add_argument("--limit",        type=int, default=None, help="Ogranicz liczbę ofert do analizy")
+    parser.add_argument("--portal",       type=str, default=None,
+                        help="Uruchom tylko wskazany portal (jjit, nofluff, pracuj, linkedin, ...)")
+    parser.add_argument("--ignore-seen",  action="store_true",
+                        help="Analizuj wszystkie oferty, nawet te już w DB (do testów)")
     args = parser.parse_args()
-    run(no_analyze=args.no_analyze, limit=args.limit)
+    run(
+        no_analyze=args.no_analyze,
+        limit=args.limit,
+        portals=[args.portal] if args.portal else None,
+        ignore_seen=args.ignore_seen,
+    )

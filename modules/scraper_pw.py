@@ -106,10 +106,244 @@ JJIT_SEARCH_TERMS = [
 ]
 
 
-def _jjit_clean_text(html_or_text: str) -> str:
-    """Usuwa HTML, zwija białe znaki, przycina do DESC_MAX_CHARS."""
-    text = BeautifulSoup(html_or_text or "", "html.parser").get_text(separator=" ")
-    return re.sub(r"\s+", " ", text).strip()[:DESC_MAX_CHARS]
+def _jjit_salary_from_api(et_list: list) -> tuple[str, int, str]:
+    """
+    Wyciąga (salary_str, salary_from_pln_month, contract_type) z employmentTypes.
+
+    Struktura JJIT API:
+      - from/to       = miesięczna suma PLN (zawsze, niezależnie od unit)
+      - fromPerUnit   = stawka godzinowa (gdy unit='Hour')
+      - unit='Hour'   → kontrakt rozliczany godzinowo, ale from/to już są /mies.
+
+    Bierze tylko currencySource='original'; priorytety: b2b > permanent > reszta.
+    Zwraca ("", 0, "") gdy brak widełek.
+    """
+    if not et_list:
+        return "", 0, ""
+
+    original = [et for et in et_list if et.get("currencySource") == "original"] or et_list
+    _PRIO = {"b2b": 0, "b2b_contract": 0, "permanent": 1,
+             "contract_of_employment": 1, "mandate_contract": 2}
+    ordered = sorted(original, key=lambda x: _PRIO.get(x.get("type", ""), 9))
+
+    for et in ordered:
+        sf = et.get("from") or 0
+        st = et.get("to")   or 0
+        if not sf:
+            continue
+        cur   = et.get("currency", "PLN") or "PLN"
+        ctype = et.get("type", "") or ""
+        unit  = (et.get("unit") or "month").lower()
+
+        # Dla kontraktów godzinowych pokaż stawkę /h w nawiasie
+        if unit in ("hour", "hourly", "h"):
+            sf_h = et.get("fromPerUnit") or 0
+            st_h = et.get("toPerUnit")   or 0
+            hourly_note = (f" [{int(sf_h)}–{int(st_h)} {cur}/h]"
+                           if sf_h and st_h else
+                           f" [{int(sf_h)} {cur}/h]" if sf_h else "")
+        else:
+            hourly_note = ""
+
+        sf_int = int(sf)
+        st_int = int(st) if st else 0
+        sal_str = (f"{sf_int:,}–{st_int:,} {cur}/mies. ({ctype}){hourly_note}"
+                   if st_int else
+                   f"od {sf_int:,} {cur}/mies. ({ctype}){hourly_note}")
+        return sal_str, sf_int, ctype
+
+    # Brak widełek – zwróć przynajmniej typ kontraktu
+    return "", 0, (ordered[0].get("type", "") if ordered else "")
+
+
+# ── Inteligentne czyszczenie opisu JJIT ──────────────────────────────────────
+
+_CLEAN_MAX = 1_500   # limit oczyszczonego opisu (zamiast surowych 2500)
+
+_DROP_KW = frozenset({
+    # English
+    "about us", "who we are", "about the company", "about company",
+    "we offer", "what we offer", "benefits", "perks", "why join",
+    "equal opportunity", "diversity", "what we provide", "our offer",
+    "what do we offer", "what you'll get", "what you get",
+    "what we give",
+    # Polish
+    "o nas", "o firmie", "oferujemy", "co oferujemy", "benefity",
+    "co zyskujesz", "dlaczego my", "oferta zawiera", "co ci oferujemy",
+    "nasze benefity", "dla ciebie", "co ci dajemy", "dlaczego warto",
+})
+
+_KEEP_KW = frozenset({
+    # English
+    "requirements", "qualifications", "must have", "nice to have",
+    "what we're looking for", "what we are looking for",
+    "responsibilities", "your role", "what you'll do", "what you will do",
+    "your responsibilities", "key responsibilities", "about the role",
+    "the role", "your mission", "role summary", "the job",
+    "people leadership", "technical leadership", "delivery", "execution",
+    "collaboration", "architecture", "engineering", "leadership",
+    "growth", "mentorship", "management",
+    # Polish
+    "wymagania", "obowiązki", "oczekujemy", "szukamy", "twoja rola",
+    "zakres obowiązków", "mile widziane", "czego oczekujemy",
+    "twoje zadania", "co będziesz robić", "wymagane", "oczekiwania",
+    "co robisz", "twoje obowiązki", "twoja misja", "zakres",
+})
+
+
+def _heading_label(text: str) -> str:
+    """Klasyfikuje nagłówek sekcji: 'drop' | 'keep' | 'unknown'."""
+    t = text.lower().strip().rstrip(":")
+    for kw in _DROP_KW:
+        if kw in t:
+            return "drop"
+    for kw in _KEEP_KW:
+        if kw in t:
+            return "keep"
+    return "unknown"
+
+
+def _is_section_header(el) -> bool:
+    """
+    True dla h1-h6, <p><strong>...</strong></p> (samodzielny bold)
+    oraz krótkich <p> z czystym tekstem bez interpunkcji zdaniowej
+    (np. <p>Requirements</p>, <p>Key Responsibilities</p>).
+    """
+    if el.name in ("h1", "h2", "h3", "h4", "h5", "h6"):
+        return True
+    if el.name == "p":
+        kids = [c for c in el.children if str(c).strip()]
+        # Samodzielny <strong> lub <b>
+        if (len(kids) == 1
+                and hasattr(kids[0], "name")
+                and kids[0].name in ("strong", "b")):
+            return True
+        # Krótki czysty tekst bez zdaniowej interpunkcji → działa jak nagłówek
+        text = el.get_text(strip=True)
+        if (len(text) <= 60
+                and not any(c in text for c in ".?!")
+                and not text.endswith(",")
+                and len(kids) <= 1):
+            return True
+    return False
+
+
+def _lines_from_elems(elems: list) -> list[str]:
+    """Wyciąga listę linii tekstu z listy elementów BeautifulSoup."""
+    lines: list[str] = []
+    for el in elems:
+        if not hasattr(el, "name") or not el.name:
+            continue
+        if el.name in ("ul", "ol"):
+            for li in el.find_all("li"):
+                t = re.sub(r"\s+", " ", li.get_text(separator=" ")).strip()
+                if t:
+                    lines.append(f"• {t}")
+        elif el.name == "p":
+            t = re.sub(r"\s+", " ", el.get_text(separator=" ")).strip()
+            if len(t) > 10:
+                lines.append(t)
+        elif el.name in ("div", "section", "article", "span"):
+            # Zejdź rekurencyjnie w kontenery
+            sub = [c for c in el.children if hasattr(c, "name") and c.name]
+            lines.extend(_lines_from_elems(sub))
+        else:
+            t = re.sub(r"\s+", " ", el.get_text(separator=" ")).strip()
+            if len(t) > 10:
+                lines.append(t)
+    return lines
+
+
+def _split_sections(container) -> list[tuple[str, list]]:
+    """
+    Dzieli bezpośrednie dzieci kontenera na sekcje wg nagłówków.
+    Zwraca listę (label, [elementy]).
+    """
+    sections: list[tuple[str, list]] = []
+    cur_label = "unknown"
+    cur_elems: list = []
+
+    for el in container.children:
+        if not hasattr(el, "name") or not el.name:
+            continue
+        if _is_section_header(el):
+            if cur_elems:
+                sections.append((cur_label, cur_elems))
+            cur_label = _heading_label(el.get_text(strip=True))
+            cur_elems = []
+        else:
+            cur_elems.append(el)
+
+    if cur_elems:
+        sections.append((cur_label, cur_elems))
+    return sections
+
+
+def _trim_to_limit(text: str, limit: int = _CLEAN_MAX) -> str:
+    """Przycina tekst do ~limit znaków na granicy linii lub słowa."""
+    if len(text) <= limit:
+        return text
+    cut = text.rfind("\n", 0, limit)
+    if cut < int(limit * 0.75):
+        cut = text.rfind(" ", 0, limit)
+    if cut < int(limit * 0.75):
+        cut = limit
+    return text[:cut].rstrip()
+
+
+def _clean_jjit_description(html: str) -> str:
+    """
+    Filtruje HTML opisu JJIT: wycina marketing (about us, benefits),
+    zostawia wymagania i obowiązki. Zwraca czysty tekst ≤ ~1500 znaków.
+
+    Fallback 1: wszystkie <li> z sekcji non-drop.
+    Fallback 2: surowy get_text().
+    """
+    if not html:
+        return ""
+
+    soup = BeautifulSoup(html, "html.parser")
+    container = soup.find("body") or soup
+
+    sections = _split_sections(container)
+
+    # Jeśli kontener ma tylko jeden wrapper-div, zejdź poziom niżej
+    if len(sections) <= 1:
+        wrapper = container.find("div")
+        if wrapper:
+            deeper = _split_sections(wrapper)
+            if len(deeper) > 1:
+                sections = deeper
+
+    # ── Zbierz linie z sekcji non-drop ───────────────────────────────────────
+    lines: list[str] = []
+    for label, elems in sections:
+        if label == "drop":
+            continue
+        lines.extend(_lines_from_elems(elems))
+
+    result = "\n".join(lines).strip()
+
+    # ── Fallback 1: wszystkie <li> z non-drop ────────────────────────────────
+    if len(result) < 100:
+        li_lines: list[str] = []
+        for label, elems in sections:
+            if label == "drop":
+                continue
+            for el in elems:
+                if hasattr(el, "find_all"):
+                    for li in el.find_all("li"):
+                        t = re.sub(r"\s+", " ", li.get_text(separator=" ")).strip()
+                        if t:
+                            li_lines.append(f"• {t}")
+        if li_lines:
+            result = "\n".join(li_lines).strip()
+
+    # ── Fallback 2: surowy tekst ──────────────────────────────────────────────
+    if len(result) < 100:
+        result = re.sub(r"\s+", " ", soup.get_text(separator=" ")).strip()
+
+    return _trim_to_limit(result)
 
 
 def _jjit_fetch_list_page(page, term: str, cursor: int | None) -> dict | None:
@@ -131,11 +365,11 @@ def _jjit_fetch_list_page(page, term: str, cursor: int | None) -> dict | None:
 
 def _jjit_fetch_description(page, slug: str, offer_url: str) -> str:
     """
-    Pobiera opis oferty (czysty tekst, max DESC_MAX_CHARS).
-    Próba 1: GET /api/candidate-api/offers/{slug} – pole body.
-    Próba 2: DOM strony oferty – div[data-testid*=description] lub główna sekcja treści.
+    Pobiera i czyści opis oferty (wymagania/obowiązki, max ~1500 znaków).
+    Próba 1: GET /api/candidate-api/offers/{slug} – pole body (HTML).
+    Próba 2: DOM strony oferty.
     """
-    # Próba 1: detail endpoint API
+    # Próba 1: detail endpoint API (body = surowy HTML)
     try:
         resp = page.goto(
             f"{_JJIT_API_BASE}/{slug}",
@@ -145,7 +379,7 @@ def _jjit_fetch_description(page, slug: str, offer_url: str) -> str:
             data = resp.json()
             body = data.get("body") or data.get("description") or ""
             if body:
-                return _jjit_clean_text(body)
+                return _clean_jjit_description(body)
     except Exception as e:
         logger.debug(f"[JJIT] detail API błąd ({slug}): {e}")
 
@@ -154,18 +388,16 @@ def _jjit_fetch_description(page, slug: str, offer_url: str) -> str:
         page.goto(offer_url, timeout=20_000, wait_until="domcontentloaded")
         page.wait_for_timeout(2_000)
         soup = BeautifulSoup(page.content(), "html.parser")
-        # Szukamy kontenera z opisem po kolejności preferencji
         el = (
             soup.find(attrs={"data-testid": re.compile(r"job.desc|description", re.I)})
             or soup.find("div", class_=re.compile(r"JobDescription|job-desc|offer-desc", re.I))
             or soup.find("section", class_=re.compile(r"description|content", re.I))
         )
         if el:
-            return _jjit_clean_text(el.get_text(separator=" "))
-        # Ostateczny fallback: sekcja main z największą ilością tekstu
+            return _clean_jjit_description(str(el))
         main = soup.find("main") or soup.find("article")
         if main:
-            return _jjit_clean_text(main.get_text(separator=" "))
+            return _clean_jjit_description(str(main))
     except Exception as e:
         logger.debug(f"[JJIT] DOM detail błąd ({offer_url}): {e}")
 
@@ -258,17 +490,22 @@ def scrape_justjoinit() -> list[dict]:
                             for s in (item.get("niceToHaveSkills") or [])]
                     skills = [str(s) for s in req + nice if s]
 
+                    # Salary z API – ustawia salary/salary_from, pomija predykcję
+                    et_list = item.get("employmentTypes") or []
+                    sal_str, sal_from, sal_contract = _jjit_salary_from_api(et_list)
+
                     candidates.append({
-                        "_slug":       slug,
-                        "source":      "JustJoinIT",
-                        "title":       title,
-                        "company":     item.get("companyName") or "",
-                        "location":    location,
-                        "salary":      "",
-                        "salary_from": 0,
-                        "url":         offer_url,
-                        "skills":      skills,
-                        "description": "",
+                        "_slug":           slug,
+                        "source":          "JustJoinIT",
+                        "title":           title,
+                        "company":         item.get("companyName") or "",
+                        "location":        location,
+                        "salary":          sal_str,
+                        "salary_from":     sal_from,
+                        "salary_contract": sal_contract,
+                        "url":             offer_url,
+                        "skills":          skills,
+                        "description":     "",
                     })
 
                 cursor = (meta.get("next") or {}).get("cursor")
