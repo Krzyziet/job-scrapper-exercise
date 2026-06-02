@@ -91,7 +91,6 @@ def _make_browser(playwright) -> tuple[Browser, BrowserContext]:
     )
     return browser, ctx
 
-
 # ── Pracuj.pl ──────────────────────────────────────────────────────────────────
 
 PRACUJ_QUERIES = [

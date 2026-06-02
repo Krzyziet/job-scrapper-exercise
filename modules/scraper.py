@@ -4,7 +4,6 @@ Scraper ofert pracy z portali:
   2. NoFluffJobs       – scraping HTML + __NEXT_DATA__
   4. Pracuj.pl         – session + __NEXT_DATA__ JSON w HTML
   5. Bulldogjob        – __NEXT_DATA__ JSON w HTML
-  6. TheProtocol       – __NEXT_DATA__ JSON w HTML
 """
 
 import re
@@ -932,137 +931,6 @@ def scrape_bulldogjob() -> list[dict]:
     return results
 
 
-# ── 6. TheProtocol.it ──────────────────────────────────────────────────────────
-# Struktura __NEXT_DATA__ (zweryfikowana):
-#   offersResponse.offers[] = [{title, employer (string!), workplace [{city}],
-#                                salary {to, currency}, typesOfContracts [{salary.from}],
-#                                workModes [], technologies [], offerUrlName}]
-# Filtr kategorii (/t/...) jest zepsuty – scrapujemy zdalnie + paginacja, filtr po tytule.
-
-PROTOCOL_BASE = "https://theprotocol.it"
-PROTOCOL_REMOTE_URL = f"{PROTOCOL_BASE}/filtry/oferty;tryb-pracy/zdalnie"
-
-
-def _protocol_salary(o: dict) -> tuple[str, int]:
-    """Pobiera najlepszą kwotę z typesOfContracts (ma 'from')."""
-    contracts = o.get("typesOfContracts") or []
-    best_from, best_to, best_cur = 0, 0, "zł"
-    for c in contracts:
-        s = c.get("salary") or {}
-        if not s:
-            continue
-        lo = s.get("from") or 0
-        hi = s.get("to") or 0
-        cur = s.get("currencySymbol", "zł")
-        # tylko wynagrodzenia miesięczne (timeUnitId=0)
-        if s.get("timeUnitId", 0) != 0:
-            continue
-        if lo > best_from:
-            best_from, best_to, best_cur = lo, hi, cur
-    if best_from:
-        return f"{best_from:,}–{best_to:,} {best_cur}/mies.", best_from
-    # fallback: tylko pole salary.to
-    sal = o.get("salary") or {}
-    if isinstance(sal, dict) and sal.get("to"):
-        unit = (sal.get("timeUnit") or {}).get("shortForm", "")
-        if "mth" in unit or "mies" in unit:
-            return f"do {sal['to']:,} {sal.get('currency','zł')}/mies.", 0
-    return "", 0
-
-
-def scrape_theprotocol(max_pages: int = 30) -> list[dict]:
-    results = []
-    seen = set()
-    session = _make_session(PROTOCOL_BASE)
-
-    for page in range(1, max_pages + 1):
-        url = PROTOCOL_REMOTE_URL if page == 1 else f"{PROTOCOL_REMOTE_URL};strona/{page}"
-        r = _get(url, session=session)
-        if not r:
-            break
-
-        soup = BeautifulSoup(r.text, "html.parser")
-        script = soup.find("script", id="__NEXT_DATA__")
-        if not script:
-            break
-        try:
-            data = _json.loads(script.string)
-            oresp = data["props"]["pageProps"].get("offersResponse", {})
-            offers_raw = oresp.get("offers", [])
-        except Exception as e:
-            logger.warning(f"[TheProtocol] p.{page} __NEXT_DATA__ błąd: {e}")
-            break
-
-        if not offers_raw:
-            break
-
-        found_this_page = 0
-        for o in offers_raw:
-            if not isinstance(o, dict):
-                continue
-            title = o.get("title", "")
-            if not _matches_role(title):
-                continue
-
-            offer_url_name = o.get("offerUrlName", "")
-            offer_url = f"{PROTOCOL_BASE}/szczegoly/{offer_url_name}" if offer_url_name else ""
-            if offer_url in seen:
-                continue
-            seen.add(offer_url)
-
-            # employer to bezpośrednio string
-            company = o.get("employer", "") or ""
-
-            # workplace – lista dict z polem city (lub string w nowszych wersjach)
-            workplaces = o.get("workplace") or []
-            cities = []
-            for w in workplaces:
-                if isinstance(w, dict):
-                    c = w.get("city", "")
-                    if c:
-                        cities.append(c)
-                elif isinstance(w, str) and w:
-                    cities.append(w)
-            loc_str = ", ".join(cities) if cities else "remote"
-
-            work_modes = o.get("workModes") or []
-            if any(m in ("remote", "zdalna", "zdalnie") for m in work_modes):
-                loc_str = (loc_str + " / remote").strip(" /")
-
-            sal_str, sal_from = _protocol_salary(o)
-            if sal_from and not _salary_in_range(sal_from):
-                continue
-
-            skills_raw = o.get("technologies") or []
-            skills = []
-            for t in skills_raw:
-                if isinstance(t, dict):
-                    n = t.get("name", "")
-                    if n:
-                        skills.append(n)
-                elif isinstance(t, str) and t:
-                    skills.append(t)
-
-            results.append({
-                "source": "TheProtocol",
-                "title": title,
-                "company": company,
-                "location": loc_str,
-                "salary": sal_str,
-                "salary_from": sal_from,
-                "url": offer_url,
-                "skills": skills,
-                "description": o.get("aboutProject", "") or "",
-            })
-            found_this_page += 1
-
-        logger.debug(f"[TheProtocol] p.{page}: {found_this_page} dopasowań")
-        time.sleep(0.8)
-
-    logger.info(f"[TheProtocol] {len(results)} ofert")
-    return results
-
-
 
 # ── Deduplikacja ───────────────────────────────────────────────────────────────
 
@@ -1111,7 +979,6 @@ _PORTAL_ALIASES: dict[str, str] = {
     "nofluff":        "nofluffjobs",
     "nofluffjobs":    "nofluffjobs",
     "pracuj":         "pracuj",
-    "theprotocol":    "theprotocol",
     "bulldogjob":     "bulldogjob",
 }
 
@@ -1128,7 +995,7 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
     """
     Uruchamia scrapery. portals=None → wszystkie; portals=["jjit"] → tylko JJIT.
     Obsługuje aliasy: jjit/justjoinit, nofluff/nofluffjobs, pracuj,
-    theprotocol, bulldogjob.
+    bulldogjob.
     """
     # Normalizuj aliasy do zestawu kluczy kanonicznych
     if portals:
@@ -1146,7 +1013,6 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
     scrapers = [
         ("justjoinit",      scrape_justjoinit),
         ("nofluffjobs",     scrape_nofluffjobs),
-        ("theprotocol",     scrape_theprotocol),
         ("bulldogjob",      scrape_bulldogjob),
     ]
 
