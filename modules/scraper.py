@@ -2,7 +2,6 @@
 Scraper ofert pracy z portali:
   1. JustJoinIT       – publiczne API v1 (zwraca wszystkie oferty)
   2. NoFluffJobs       – scraping HTML + __NEXT_DATA__
-  3. LinkedIn          – guest API (nie wymaga logowania)
   4. Pracuj.pl         – session + __NEXT_DATA__ JSON w HTML
   5. Bulldogjob        – __NEXT_DATA__ JSON w HTML
   6. TheProtocol       – __NEXT_DATA__ JSON w HTML
@@ -747,69 +746,6 @@ def scrape_nofluffjobs() -> list[dict]:
     return all_results
 
 
-# ── 3. LinkedIn (guest API) ────────────────────────────────────────────────────
-
-LI_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
-
-
-def scrape_linkedin(max_pages: int = 3) -> list[dict]:
-    results = []
-    search_terms = [
-        "Chapter Lead IT Poland",
-        "Engineering Manager IT Poland",
-        "IT Manager Poland",
-        "Technical Product Owner Poland",
-        "Product Owner IT Poland",
-        "IT Operations Manager Poland",
-    ]
-    for term in search_terms:
-        for start in range(0, max_pages * 25, 25):
-            r = _get(LI_URL, {
-                "keywords": term,
-                "location": "Poland",
-                "start": start,
-                "f_WT": "2",        # remote
-                "f_TPR": "r604800", # ostatni tydzień
-            })
-            if not r or not r.text.strip():
-                break
-            soup = BeautifulSoup(r.text, "html.parser")
-            cards = soup.find_all("li")
-            if not cards:
-                break
-            found_any = False
-            for card in cards:
-                title_el = card.find("h3", class_=re.compile("base-search-card__title|job-card.*title"))
-                company_el = card.find("h4", class_=re.compile("base-search-card__subtitle|company"))
-                loc_el = card.find("span", class_=re.compile("job-search-card__location|location"))
-                link_el = card.find("a", href=re.compile(r"/jobs/view/"))
-                if not title_el or not link_el:
-                    continue
-                title = title_el.get_text(strip=True)
-                company = company_el.get_text(strip=True) if company_el else ""
-                location = loc_el.get_text(strip=True) if loc_el else "Poland"
-                href = link_el.get("href", "").split("?")[0]
-                if not _matches_role(title):
-                    continue
-                results.append({
-                    "source": "LinkedIn",
-                    "title": title,
-                    "company": company,
-                    "location": location,
-                    "salary": "",
-                    "salary_from": 0,
-                    "url": href,
-                    "skills": [],
-                    "description": "",
-                })
-                found_any = True
-            if not found_any:
-                break
-            time.sleep(1.5)  # LinkedIn jest czuły na szybkie requesty
-    logger.info(f"[LinkedIn] {len(results)} ofert")
-    return results
-
-
 # ── 4. Pracuj.pl ───────────────────────────────────────────────────────────────
 # Pracuj.pl blokuje proste requesty (403). Używamy sesji która najpierw pobiera
 # stronę główną (dostaje cookies/CF clearance), potem dopiero szuka ofert.
@@ -1175,7 +1111,6 @@ _PORTAL_ALIASES: dict[str, str] = {
     "nofluff":        "nofluffjobs",
     "nofluffjobs":    "nofluffjobs",
     "pracuj":         "pracuj",
-    "linkedin":       "linkedin",
     "theprotocol":    "theprotocol",
     "bulldogjob":     "bulldogjob",
 }
@@ -1192,7 +1127,7 @@ def _playwright_available() -> bool:
 def scrape_all(portals: list[str] | None = None) -> list[dict]:
     """
     Uruchamia scrapery. portals=None → wszystkie; portals=["jjit"] → tylko JJIT.
-    Obsługuje aliasy: jjit/justjoinit, nofluff/nofluffjobs, pracuj, linkedin,
+    Obsługuje aliasy: jjit/justjoinit, nofluff/nofluffjobs, pracuj,
     theprotocol, bulldogjob.
     """
     # Normalizuj aliasy do zestawu kluczy kanonicznych
@@ -1211,7 +1146,6 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
     scrapers = [
         ("justjoinit",      scrape_justjoinit),
         ("nofluffjobs",     scrape_nofluffjobs),
-        ("linkedin",        scrape_linkedin),
         ("theprotocol",     scrape_theprotocol),
         ("bulldogjob",      scrape_bulldogjob),
     ]
