@@ -1,4 +1,7 @@
 results/
+project.md
+ROADMAP.md
+debug/
 githubs-sa-key.json
 .env
 .env.example
