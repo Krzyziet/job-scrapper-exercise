@@ -14,9 +14,14 @@ from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 import openpyxl
-from modules.company_urls import get_company_url
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+from modules.analyzer import analyze_all, _normalize_salary_pln, claude_available
+from modules.company_urls import get_company_url
+from modules.emailer import send_report, _email_available
+from modules.profile import VERDICT_THRESHOLD
+from modules.scraper import scrape_all
 
 # Force UTF-8 output on Windows terminals
 if hasattr(sys.stdout, "reconfigure"):
@@ -24,19 +29,21 @@ if hasattr(sys.stdout, "reconfigure"):
 
 load_dotenv()
 
-_LOGS_DIR = Path("logs")
-_LOGS_DIR.mkdir(exist_ok=True)
-_log_file = _LOGS_DIR / f"job_hunter_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+# Logging – katalog tworzony leniwie żeby uniknąć side-effectów przy imporcie
+def _setup_logging() -> None:
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+    log_file = logs_dir / f"job_hunter_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file, encoding="utf-8"),
+        ],
+    )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(_log_file, encoding="utf-8"),
-    ],
-)
 logger = logging.getLogger(__name__)
 
 RESULTS_DIR = Path("results")
@@ -103,7 +110,7 @@ def print_results(offers: list[dict]) -> None:
 
     if skip_list:
         print(f"{DIM}{'─' * 90}")
-        print(f"  SKIP – score < 6  ({len(skip_list)} ofert poniżej progu, spełniły warunki lokalizacji/wynagrodzenia)")
+        print(f"  SKIP – score < {VERDICT_THRESHOLD}  ({len(skip_list)} ofert poniżej progu, spełniły warunki lokalizacji/wynagrodzenia)")
         print(f"{'─' * 90}{RESET}\n")
         for i, o in enumerate(skip_list, 1):
             _print_offer(i, o, dim=True)
@@ -131,7 +138,9 @@ def _salary_type(o: dict) -> str:
     if not o.get("salary_predicted"):
         return "ogłoszenie"
     contract = (o.get("salary_contract") or "").upper()
-    model = "claude" if "est.reguły" not in o.get("salary", "").lower() else "reguły"
+    # analyzer.py zapisuje "[est.reguły]" gdy brak Claude, "[est.AI ...]" gdy Claude
+    salary_str = o.get("salary", "").lower()
+    model = "reguły" if "est.reguły" in salary_str else "claude"
     return f"AI est. ({model}{', ' + contract if contract else ''})"
 
 
@@ -243,9 +252,8 @@ def _save_xlsx(offers: list[dict], path: Path) -> None:
 
 
 def _check_env():
-    from modules.analyzer import claude_available
-    key = claude_available()
-    if not key:
+    available = claude_available()
+    if not available:
         print(f"\n{YELLOW}[!] CLAUDE_API_KEY nie ustawiony lub nieprawidłowy{RESET}")
         print(f"{DIM}   Scoring i predykcja płac działają w trybie REGUŁ (bez AI).{RESET}")
         print(f"{DIM}   Lokalnie: ustaw CLAUDE_API_KEY=sk-ant-... w pliku .env{RESET}")
@@ -261,9 +269,7 @@ def _db_available() -> bool:
 
 def run(no_analyze: bool = False, limit: int = None,
         portals: list[str] | None = None, ignore_seen: bool = False):
-    from modules.scraper import scrape_all
-    from modules.analyzer import analyze_all, _normalize_salary_pln
-
+    _setup_logging()   # no-op jeśli logging już skonfigurowany
     _check_env()
     logger.info("=== Job Hunter START ===")
 
@@ -356,7 +362,6 @@ def run(no_analyze: bool = False, limit: int = None,
     print(f"{DIM}              XLSX: {xls_path}{RESET}")
 
     # 4. E-mail z raportem
-    from modules.emailer import send_report, _email_available
     if _email_available():
         send_report(scored, xls_path, total_scraped=total_scraped)
         print(f"{GREEN}[OK] Raport wysłany e-mailem{RESET}")
@@ -374,6 +379,7 @@ def run(no_analyze: bool = False, limit: int = None,
 
 
 if __name__ == "__main__":
+    _setup_logging()
     parser = argparse.ArgumentParser(description="Job Hunter – lokalny scraper ofert")
     parser.add_argument("--no-analyze",   action="store_true", help="Pomiń analizę Claude (tylko scraping)")
     parser.add_argument("--limit",        type=int, default=None, help="Ogranicz liczbę ofert do analizy")
