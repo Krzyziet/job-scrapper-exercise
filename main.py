@@ -63,7 +63,7 @@ def _display_score(o: dict) -> str:
     """Zwraca final_score (float) jeśli dostępny, inaczej score (int)."""
     fs = o.get("final_score")
     if fs is not None:
-        return f"{fs:.2f}"
+        return f"{fs:.1f}"
     s = o.get("score")
     return str(s) if s is not None else "?"
 
@@ -182,7 +182,7 @@ def _save_xlsx(offers: list[dict], path: Path) -> None:
     for row_idx, o in enumerate(offers, 2):
         is_apply    = o.get("verdict") == "APPLY"
         fill        = apply_fill if is_apply else skip_fill
-        score       = o.get("final_score") if o.get("final_score") is not None else o.get("score", "")
+        score       = round(o["final_score"], 1) if o.get("final_score") is not None else o.get("score", "")
         offer_url   = o.get("url", "")
         company     = o.get("company", "")
         company_url = get_company_url(company)
