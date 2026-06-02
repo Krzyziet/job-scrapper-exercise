@@ -95,7 +95,6 @@ def scrape_pracuj() -> list[dict]:
                 continue
 
             html = page.content()
-            from bs4 import BeautifulSoup
             soup = BeautifulSoup(html, "html.parser")
             script = soup.find("script", id="__NEXT_DATA__")
 
