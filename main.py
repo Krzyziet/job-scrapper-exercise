@@ -163,6 +163,7 @@ def _save_xlsx(offers: list[dict], path: Path) -> None:
         ("Źródło",                  13),
         ("Akcent CV",               12),
         ("Powód dopasowania",       42),
+        ("Luki kandydata",          40),
         ("Opis oferty",             70),
         ("URL oferty",              50),
         ("Strona kariery firmy",    40),
@@ -187,6 +188,7 @@ def _save_xlsx(offers: list[dict], path: Path) -> None:
         company_url = get_company_url(company)
 
         desc_cell = (o.get("description") or "")[:500]
+        key_gaps  = "; ".join(o.get("key_gaps") or [])
 
         values = [
             score,
@@ -199,6 +201,7 @@ def _save_xlsx(offers: list[dict], path: Path) -> None:
             o.get("source", ""),
             o.get("cv_emphasis", ""),
             o.get("match_reason", ""),
+            key_gaps,
             desc_cell,
             offer_url,
             company_url,
@@ -217,16 +220,16 @@ def _save_xlsx(offers: list[dict], path: Path) -> None:
                 color=("00AA44" if score >= 8 else "FFA000" if score >= 6 else "888888"),
             )
 
-        # URL oferty – klikalne hiperłącze (kolumna 12 po dodaniu Opis)
+        # URL oferty – klikalne hiperłącze (kolumna 13 po dodaniu Luki)
         if offer_url:
-            c = ws.cell(row=row_idx, column=12)
+            c = ws.cell(row=row_idx, column=13)
             c.hyperlink = offer_url
             c.value     = offer_url
             c.font      = url_font
 
-        # Strona kariery – klikalne hiperłącze (kolumna 13)
+        # Strona kariery – klikalne hiperłącze (kolumna 14)
         if company_url:
-            c = ws.cell(row=row_idx, column=13)
+            c = ws.cell(row=row_idx, column=14)
             c.hyperlink = company_url
             c.value     = company_url
             c.font      = url_font
@@ -374,14 +377,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Job Hunter – lokalny scraper ofert")
     parser.add_argument("--no-analyze",   action="store_true", help="Pomiń analizę Claude (tylko scraping)")
     parser.add_argument("--limit",        type=int, default=None, help="Ogranicz liczbę ofert do analizy")
-    parser.add_argument("--portal",       type=str, default=None,
-                        help="Uruchom tylko wskazany portal (jjit, nofluff, pracuj, linkedin, ...)")
+    parser.add_argument("--portal",       type=str, nargs="+", default=None,
+                        help="Uruchom tylko wskazane portale, np. --portal jjit nofluff")
     parser.add_argument("--ignore-seen",  action="store_true",
                         help="Analizuj wszystkie oferty, nawet te już w DB (do testów)")
     args = parser.parse_args()
     run(
         no_analyze=args.no_analyze,
         limit=args.limit,
-        portals=[args.portal] if args.portal else None,
+        portals=args.portal,  # już lista dzięki nargs="+"
         ignore_seen=args.ignore_seen,
     )

@@ -500,7 +500,7 @@ def analyze_all(offers: list[dict]) -> list[dict]:
         logger.info(f"[ANALYZER] {i}/{len(filtered)} – {offer.get('title')} @ {offer.get('company')}")
         scored.append(analyze_offer(offer))
 
-    scored.sort(key=lambda x: x.get("score", 0), reverse=True)
+    scored.sort(key=lambda x: x.get("final_score") or x.get("score") or 0, reverse=True)
     apply_n = sum(1 for o in scored if o.get("verdict") == "APPLY")
     logger.info(f"[ANALYZER] {apply_n} APPLY  {len(scored) - apply_n} SKIP  łącznie: {len(scored)}")
     return scored
