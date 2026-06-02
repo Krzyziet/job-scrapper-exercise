@@ -6,8 +6,6 @@ Scraper ofert pracy z portali:
   4. Pracuj.pl         – session + __NEXT_DATA__ JSON w HTML
   5. Bulldogjob        – __NEXT_DATA__ JSON w HTML
   6. TheProtocol       – __NEXT_DATA__ JSON w HTML
-  7. RemoteOK          – publiczne JSON API (oferty zdalne, wynagrodzenie USD)
-  8. WeWorkRemotely    – RSS feed (oferty zdalne, wynagrodzenie USD)
 """
 
 import re
@@ -1129,146 +1127,6 @@ def scrape_theprotocol(max_pages: int = 30) -> list[dict]:
     return results
 
 
-# ── 7. RemoteOK ────────────────────────────────────────────────────────────────
-# Publiczne JSON API – tag-based search zwraca do 100 ofert na tag.
-# Wynagrodzenia w USD rocznie – salary_from=0 żeby pominąć filtr PLN.
-
-REMOTEOK_API = "https://remoteok.com/api"
-_REMOTEOK_TAGS = ["product", "manager", "exec"]
-
-
-def scrape_remoteok() -> list[dict]:
-    _headers = {**HEADERS, "Accept": "application/json"}
-    results = []
-    seen: set[str] = set()
-
-    for tag in _REMOTEOK_TAGS:
-        try:
-            r = requests.get(
-                REMOTEOK_API,
-                params={"tag": tag},
-                headers=_headers,
-                timeout=25,
-            )
-            r.raise_for_status()
-            r.encoding = "utf-8"
-            data = r.json()
-        except Exception as e:
-            logger.warning(f"[RemoteOK] błąd dla tag={tag}: {e}")
-            continue
-
-        for job in data:
-            if not isinstance(job, dict) or "id" not in job:
-                continue
-            if not _is_recent(job.get("epoch") or job.get("date")):
-                continue
-            title = (job.get("position", "") or "").replace("&amp;", "&").strip()
-            if not _matches_role(title):
-                continue
-            url = job.get("url", "")
-            if url in seen:
-                continue
-            seen.add(url)
-            company = job.get("company", "")
-            location = job.get("location", "") or "remote"
-            tags_list = job.get("tags") or []
-            sal_min = job.get("salary_min") or 0
-            sal_max = job.get("salary_max") or 0
-            sal_str = ""
-            if sal_min or sal_max:
-                sal_str = (
-                    f"{sal_min:,}–{sal_max:,} USD/yr"
-                    if sal_max
-                    else f"od {sal_min:,} USD/yr"
-                )
-            desc = _clean_html_description(job.get("description") or "")
-            results.append({
-                "source": "RemoteOK",
-                "title": title,
-                "company": company,
-                "location": location,
-                "salary": sal_str,
-                "salary_from": 0,
-                "url": url,
-                "skills": [t for t in tags_list if isinstance(t, str)],
-                "description": desc,
-            })
-        time.sleep(1)
-
-    logger.info(f"[RemoteOK] {len(results)} ofert")
-    return results
-
-
-# ── 8. We Work Remotely ────────────────────────────────────────────────────────
-# RSS feeds dla kategorii Management i Product.
-# Format tytułu: "Kategoria: Stanowisko at Firma"
-
-_WWR_REGION_NS = "https://weworkremotely.com/namespaces/rss/1.0"
-
-WWR_FEEDS = [
-    "https://weworkremotely.com/categories/remote-management-and-finance-jobs.rss",
-    "https://weworkremotely.com/categories/remote-product-jobs.rss",
-]
-
-
-def scrape_weworkremotely() -> list[dict]:
-    results = []
-    seen: set[str] = set()
-
-    for feed_url in WWR_FEEDS:
-        r = _get(feed_url, timeout=20)
-        if not r:
-            continue
-        try:
-            root = ET.fromstring(r.content)
-        except ET.ParseError as e:
-            logger.warning(f"[WeWorkRemotely] błąd XML ({feed_url}): {e}")
-            continue
-
-        channel = root.find("channel")
-        if channel is None:
-            continue
-
-        for item in channel.findall("item"):
-            if not _is_recent(item.findtext("pubDate")):
-                continue
-            raw_title = item.findtext("title") or ""
-            # Format: "Firma: Stanowisko" (company before colon, title after)
-            if ": " in raw_title:
-                company, title = raw_title.split(": ", 1)
-            else:
-                title, company = raw_title, ""
-            title = title.strip()
-            company = company.strip()
-
-            if not _matches_role(title):
-                continue
-
-            url = item.findtext("link") or ""
-            if url in seen:
-                continue
-            seen.add(url)
-
-            region = (
-                item.findtext(f"{{{_WWR_REGION_NS}}}region")
-                or item.findtext("region")
-                or "Worldwide"
-            )
-
-            results.append({
-                "source": "WeWorkRemotely",
-                "title": title,
-                "company": company,
-                "location": region,
-                "salary": "",
-                "salary_from": 0,
-                "url": url,
-                "skills": [],
-                "description": "",
-            })
-
-    logger.info(f"[WeWorkRemotely] {len(results)} ofert")
-    return results
 
 # ── Deduplikacja ───────────────────────────────────────────────────────────────
 
@@ -1320,8 +1178,6 @@ _PORTAL_ALIASES: dict[str, str] = {
     "linkedin":       "linkedin",
     "theprotocol":    "theprotocol",
     "bulldogjob":     "bulldogjob",
-    "remoteok":       "remoteok",
-    "weworkremotely": "weworkremotely",
 }
 
 
@@ -1337,7 +1193,7 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
     """
     Uruchamia scrapery. portals=None → wszystkie; portals=["jjit"] → tylko JJIT.
     Obsługuje aliasy: jjit/justjoinit, nofluff/nofluffjobs, pracuj, linkedin,
-    theprotocol, bulldogjob, remoteok, weworkremotely.
+    theprotocol, bulldogjob.
     """
     # Normalizuj aliasy do zestawu kluczy kanonicznych
     if portals:
@@ -1358,8 +1214,6 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
         ("linkedin",        scrape_linkedin),
         ("theprotocol",     scrape_theprotocol),
         ("bulldogjob",      scrape_bulldogjob),
-        ("remoteok",        scrape_remoteok),
-        ("weworkremotely",  scrape_weworkremotely),
     ]
 
     for key, fn in scrapers:
