@@ -13,61 +13,10 @@ import time
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, Browser, BrowserContext
 
+# Wspólne helpery – importowane z scraper.py (jedno źródło prawdy)
+from modules.scraper import _matches_role, _matches_location, _salary_in_range
+
 logger = logging.getLogger(__name__)
-
-ROLES = [
-    "Product Owner", "Technical Product Owner", "Chapter Lead",
-    "IT Manager", "Engineering Manager", "Product Manager",
-    "Project Manager", "IT Operations Manager",
-    "Service Delivery Manager", "NOC Manager",
-]
-
-_REMOTE_KW = {
-    "remote", "zdalna", "zdalnie", "zdaln",
-    "cała polska", "cala polska", "poland", "fully remote", "praca zdalna",
-}
-_HYBRID_KW = {"hybrid", "hybrydow", "hybryd"}
-_TARGET_CITIES = {
-    "łódź", "lodz", "lódź",
-    "warszawa", "warsaw",
-    "gdańsk", "gdansk",
-    "gdynia",
-    "sopot",
-    "trojmiasto", "trójmiasto",
-}
-
-SALARY_MIN_UOP = 21_000
-SALARY_MIN_B2B = 23_000
-
-_JJIT_NOISE = {
-    "super offer", "new", "featured", "remote", "hybrid", "b2b", "uop",
-    "permanent", "contract", "locations", "undisclosed salary", "apply",
-}
-
-
-def _matches_role(title: str) -> bool:
-    t = title.lower()
-    return any(r.lower() in t for r in ROLES)
-
-
-def _matches_location(loc: str) -> bool:
-    if not loc:
-        return True
-    lo = loc.lower()
-    if any(kw in lo for kw in {"stacjonar", "on-site", "onsite", "in-office", "on site"}):
-        return False
-    if any(kw in lo for kw in _REMOTE_KW):
-        return True
-    if any(kw in lo for kw in _HYBRID_KW):
-        return any(city in lo for city in _TARGET_CITIES)
-    return True
-
-
-def _salary_ok(salary_from: int, contract: str = "") -> bool:
-    if salary_from <= 0:
-        return True
-    b2b = "b2b" in contract.lower()
-    return salary_from >= (SALARY_MIN_B2B if b2b else SALARY_MIN_UOP)
 
 
 def _make_browser(playwright) -> tuple[Browser, BrowserContext]:
@@ -210,7 +159,7 @@ def scrape_pracuj() -> list[dict]:
                 if not location_ok:
                     continue
 
-                if sal_from and not _salary_ok(sal_from):
+                if sal_from and not _salary_in_range(sal_from):
                     continue
 
                 seen_urls.add(offer_url)
