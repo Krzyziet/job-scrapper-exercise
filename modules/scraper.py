@@ -3,7 +3,6 @@ Scraper ofert pracy z portali:
   1. JustJoinIT       – publiczne API v1 (zwraca wszystkie oferty)
   2. NoFluffJobs       – scraping HTML + __NEXT_DATA__
   4. Pracuj.pl         – session + __NEXT_DATA__ JSON w HTML
-  5. Bulldogjob        – __NEXT_DATA__ JSON w HTML
 """
 
 import re
@@ -844,93 +843,6 @@ def scrape_pracuj() -> list[dict]:
     return results
 
 
-# ── 5. Bulldogjob ──────────────────────────────────────────────────────────────
-# Działa: /companies/jobs zwraca __NEXT_DATA__ z 50 najnowszymi ofertami.
-# Paginacja SSR niedostępna – scraper pobiera 50 ofert i filtruje po tytule.
-
-def _bdj_salary(j: dict) -> tuple[str, int, str]:
-    sal = j.get("denominatedSalaryLong") or {}
-    money_str = sal.get("money") or ""
-    currency = sal.get("currency") or "PLN"
-    hidden = sal.get("hidden", True)
-    if not money_str or hidden:
-        return "", 0, ""
-    nums = re.findall(r"\d+", money_str.replace("\xa0", "").replace(" ", ""))
-    nums_int = [int(n) for n in nums if int(n) > 100]
-    if not nums_int:
-        return "", 0, ""
-    sal_from = nums_int[0]
-    sal_str = f"{nums_int[0]:,}–{nums_int[1]:,} {currency}" if len(nums_int) >= 2 else f"{nums_int[0]:,} {currency}"
-    contract = "B2B" if j.get("contractB2b") else ("UoP" if j.get("contractEmployment") else "")
-    if contract:
-        sal_str += f" ({contract})"
-    return sal_str, sal_from, contract
-
-
-def scrape_bulldogjob() -> list[dict]:
-    results = []
-    session = _make_session("https://bulldogjob.pl")
-    r = _get("https://bulldogjob.pl/companies/jobs", session=session)
-    if not r:
-        logger.info("[Bulldogjob] 0 ofert")
-        return results
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    script = soup.find("script", id="__NEXT_DATA__")
-    if not script:
-        logger.warning("[Bulldogjob] brak __NEXT_DATA__")
-        logger.info("[Bulldogjob] 0 ofert")
-        return results
-
-    try:
-        data = _json.loads(script.string)
-        jobs = data["props"]["pageProps"].get("jobs", [])
-    except Exception as e:
-        logger.warning(f"[Bulldogjob] błąd parsowania: {e}")
-        logger.info("[Bulldogjob] 0 ofert")
-        return results
-
-    seen = set()
-    for j in jobs:
-        title = j.get("position", "")
-        if not _matches_role(title):
-            continue
-
-        job_id = j.get("id", "")
-        offer_url = f"https://bulldogjob.pl/companies/jobs/{job_id}"
-        if offer_url in seen:
-            continue
-        seen.add(offer_url)
-
-        company = (j.get("company") or {}).get("name", "")
-        city = j.get("city", "")
-        remote = j.get("remote", False)
-        loc_str = city if city else ""
-        if remote:
-            loc_str = f"{loc_str} / remote".strip(" /") if loc_str else "remote"
-
-        sal_str, sal_from, contract = _bdj_salary(j)
-        if sal_from and not _salary_in_range(sal_from, contract):
-            continue
-
-        tags = j.get("technologyTags") or []
-
-        results.append({
-            "source": "Bulldogjob",
-            "title": title,
-            "company": company,
-            "location": loc_str or "Polska",
-            "salary": sal_str,
-            "salary_from": sal_from,
-            "url": offer_url,
-            "skills": [t if isinstance(t, str) else t.get("name", "") for t in tags],
-            "description": "",
-        })
-
-    logger.info(f"[Bulldogjob] {len(results)} ofert")
-    return results
-
-
 
 # ── Deduplikacja ───────────────────────────────────────────────────────────────
 
@@ -979,7 +891,6 @@ _PORTAL_ALIASES: dict[str, str] = {
     "nofluff":        "nofluffjobs",
     "nofluffjobs":    "nofluffjobs",
     "pracuj":         "pracuj",
-    "bulldogjob":     "bulldogjob",
 }
 
 
@@ -995,7 +906,6 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
     """
     Uruchamia scrapery. portals=None → wszystkie; portals=["jjit"] → tylko JJIT.
     Obsługuje aliasy: jjit/justjoinit, nofluff/nofluffjobs, pracuj,
-    bulldogjob.
     """
     # Normalizuj aliasy do zestawu kluczy kanonicznych
     if portals:
@@ -1013,7 +923,6 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
     scrapers = [
         ("justjoinit",      scrape_justjoinit),
         ("nofluffjobs",     scrape_nofluffjobs),
-        ("bulldogjob",      scrape_bulldogjob),
     ]
 
     for key, fn in scrapers:
