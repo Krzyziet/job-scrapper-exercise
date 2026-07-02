@@ -108,7 +108,7 @@ def _build_html(offers: list[dict], total_scraped: int, run_date: str) -> str:
   <h1>🔍 Job Hunter – Raport dzienny</h1>
   <div class="summary">
     <strong>Data:</strong> {run_date}<br>
-    <strong>Przeszukano portali:</strong> JustJoinIT, NoFluffJobs, Pracuj.pl<br>
+    <strong>Przeszukano portali:</strong> JustJoinIT, NoFluffJobs, TheProtocol, Pracuj.pl<br>
     <strong>Unikalnych ofert znalezionych:</strong> {total_scraped}<br>
     <strong>APPLY (score ≥ 6):</strong> {apply_count} &nbsp;|&nbsp; <strong>SKIP:</strong> {len(offers) - apply_count} &nbsp;|&nbsp; <strong>Łącznie:</strong> {len(offers)}
   </div>

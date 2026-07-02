@@ -744,6 +744,216 @@ def scrape_nofluffjobs() -> list[dict]:
     return all_results
 
 
+# ── 3. TheProtocol.it ─────────────────────────────────────────────────────────
+# REST API: XSRF token z cookie + POST /offers/_search/rangeBox
+# Paginacja niepotrzebna – API sortuje wg daty desc, oferty z 7 dni zawsze na str. 1.
+
+_TP_API  = "https://apus-api.theprotocol.it"
+_TP_HOME = "https://theprotocol.it"
+
+TP_SEARCH_TERMS = [
+    "product owner",
+    "chapter lead",
+    "it manager",
+    "engineering manager",
+    "product manager",
+    "project manager",
+    "service delivery manager",
+]
+
+_TP_WORKMODE_REMOTE = {"zdalna", "remote", "fully remote"}
+_TP_WORKMODE_HYBRID = {"hybrydowa", "hybrid"}
+_TP_WORKMODE_ONSITE = {"stacjonar", "full office", "on-site", "onsite", "in-office"}
+
+_TP_DESC_DROP = frozenset({
+    "benefits", "about-employer", "technologies-os",
+    "technologies-expected", "technologies-optional",
+})
+
+
+def _tp_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": HEADERS["User-Agent"],
+        "Accept": "application/json",
+        "Accept-Language": "pl-PL,pl;q=0.9",
+        "Referer": _TP_HOME + "/",
+        "Origin": _TP_HOME,
+        "content-type": "application/json",
+    })
+    try:
+        s.get(_TP_HOME + "/", timeout=15)
+        s.get(_TP_API + "/csrf-token", timeout=15)
+        xsrf = s.cookies.get("XSRF-TOKEN", "")
+        if xsrf:
+            s.headers["x-xsrf-token"] = xsrf
+        time.sleep(0.5)
+    except Exception:
+        pass
+    return s
+
+
+def _tp_search_term(session: requests.Session, term: str) -> list[dict]:
+    body = {
+        "typesOfContractIds": [], "positionLevelIds": [], "cities": [],
+        "workModeCodes": [], "onlyWithProjectDescription": False,
+        "expectedTechnologies": [], "niceToHaveTechnologies": [],
+        "excludedTechnologies": [], "regionsOfWorld": [],
+        "keywords": [term], "specializationsCodes": [],
+        "isSupportingUkraine": False, "fromExternalLocations": True,
+    }
+    for attempt in range(2):
+        try:
+            r = session.post(f"{_TP_API}/offers/_search/rangeBox", json=body, timeout=20)
+            r.raise_for_status()
+            return r.json().get("offers", [])
+        except Exception as e:
+            if attempt == 0:
+                logger.debug(f"[TP] search próba 1 '{term}': {e} – retry")
+                time.sleep(2)
+            else:
+                logger.warning(f"[TP] search błąd '{term}': {e}")
+    return []
+
+
+def _tp_salary(offer: dict) -> tuple[str, int, str]:
+    contracts = offer.get("typesOfContracts") or []
+    best_sal, best_sf, best_type = None, 0, ""
+    for c in contracts:
+        sal = c.get("salary") or {}
+        sf = int(sal.get("from") or 0)
+        if not sf:
+            continue
+        kind = (sal.get("kindName") or "").lower()
+        is_b2b = "vat" in kind or "b2b" in kind
+        if best_sf == 0 or is_b2b:
+            best_sal, best_sf, best_type = sal, sf, ("b2b" if is_b2b else "uop")
+    if not best_sal:
+        return "", 0, ""
+    sf = int(best_sal.get("from") or 0)
+    st = int(best_sal.get("to") or 0)
+    cur = best_sal.get("currencySymbol") or "zł"
+    unit = ((best_sal.get("timeUnit") or {}).get("longForm") or "").lower()
+    # Stawka godzinowa → miesięczna (160h)
+    if "godz" in unit or "hour" in unit or unit.startswith("hr"):
+        note = f" ({sf}–{st} {cur}/h)" if st and st != sf else f" ({sf} {cur}/h)"
+        sf, st = sf * 160, (st * 160 if st else 0)
+    else:
+        note = ""
+    if st and st != sf:
+        sal_str = f"{sf:,}–{st:,} {cur}/mies. ({best_type}){note}"
+    else:
+        sal_str = f"od {sf:,} {cur}/mies. ({best_type}){note}"
+    return sal_str, sf, best_type
+
+
+def _tp_location(offer: dict) -> str:
+    work_modes = [m.lower() for m in (offer.get("workModes") or [])]
+    workplaces  = offer.get("workplace") or []
+    is_remote = any(any(kw in m for kw in _TP_WORKMODE_REMOTE) for m in work_modes)
+    is_hybrid = any(any(kw in m for kw in _TP_WORKMODE_HYBRID) for m in work_modes)
+    is_onsite = any(any(kw in m for kw in _TP_WORKMODE_ONSITE) for m in work_modes)
+    cities = list({wp.get("city", "") for wp in workplaces if wp.get("city")})
+    city_str = ", ".join(sorted(cities)[:3])
+    if is_remote and not is_hybrid and not is_onsite:
+        return f"{city_str} (zdalna)".strip() if city_str else "zdalna"
+    if is_hybrid:
+        return f"{city_str} (hybrydowa)" if city_str else "hybrydowa"
+    if is_onsite:
+        return f"{city_str} (stacjonarnie)" if city_str else "stacjonarnie"
+    return city_str or "Polska"
+
+
+def _tp_description(detail: dict) -> str:
+    lines = []
+    for section in (detail.get("textSections") or []):
+        if (section.get("type") or "").lower() in _TP_DESC_DROP:
+            continue
+        text = (section.get("plainText") or "").strip()
+        if not text or len(text) < 20:
+            continue
+        # plainText: "Nagłówek, treść, punkt1, ..." – usuń nagłówek
+        parts = text.split(", ", 1)
+        if len(parts) == 2 and len(parts[0]) < 60:
+            text = parts[1]
+        lines.append(text)
+    result = "\n".join(lines).strip()
+    if len(result) > 1500:
+        cut = result.rfind("\n", 0, 1500) or 1500
+        result = result[:cut].rstrip()
+    return result
+
+
+def _tp_get_detail(session: requests.Session, offer_id: str) -> dict:
+    for attempt in range(2):
+        try:
+            r = session.get(f"{_TP_API}/offers/{offer_id}", timeout=15)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            if attempt == 0:
+                logger.debug(f"[TP] detail próba 1 ({offer_id[:8]}): {e} – retry")
+                time.sleep(2)
+            else:
+                logger.debug(f"[TP] detail błąd ({offer_id[:8]}): {e}")
+    return {}
+
+
+def scrape_theprotocol() -> list[dict]:
+    session   = _tp_session()
+    seen_ids: set[str]   = set()
+    candidates: list[dict] = []
+
+    for term in TP_SEARCH_TERMS:
+        offers_raw = _tp_search_term(session, term)
+        new_n = 0
+        for o in offers_raw:
+            oid = o.get("id", "")
+            if not oid or oid in seen_ids:
+                continue
+            seen_ids.add(oid)
+            if not _is_recent(o.get("publicationDateUtc")):
+                continue
+            if not _matches_role(o.get("title", "")):
+                continue
+            loc_str = _tp_location(o)
+            if not _matches_location(loc_str):
+                continue
+            sal_str, sal_from, sal_contract = _tp_salary(o)
+            if sal_from and not _salary_in_range(sal_from, sal_contract):
+                continue
+            url_name  = o.get("offerUrlName", "")
+            offer_url = f"{_TP_HOME}/{url_name}" if url_name else ""
+            candidates.append({
+                "_id":             oid,
+                "source":          "TheProtocol",
+                "title":           o.get("title", ""),
+                "company":         o.get("employer", ""),
+                "location":        loc_str,
+                "salary":          sal_str,
+                "salary_from":     sal_from,
+                "salary_contract": sal_contract,
+                "url":             offer_url,
+                "skills":          list(o.get("technologies") or []),
+                "description":     "",
+            })
+            new_n += 1
+        logger.debug(f"[TP] '{term}': {len(offers_raw)} raw → {new_n} kandydatów")
+        time.sleep(0.5)
+
+    logger.info(f"[TheProtocol] {len(candidates)} ofert po filtrach")
+
+    for i, offer in enumerate(candidates, 1):
+        oid = offer.pop("_id")
+        detail = _tp_get_detail(session, oid)
+        offer["description"] = _tp_description(detail)
+        logger.debug(f"[TP desc] {i}/{len(candidates)} {offer['title']} @ {offer['company']}")
+        time.sleep(0.3)
+
+    logger.info(f"[TheProtocol] {len(candidates)} ofert łącznie")
+    return candidates
+
+
 # ── 4. Pracuj.pl ───────────────────────────────────────────────────────────────
 # Pracuj.pl blokuje proste requesty (403). Używamy sesji która najpierw pobiera
 # stronę główną (dostaje cookies/CF clearance), potem dopiero szuka ofert.
@@ -891,6 +1101,8 @@ _PORTAL_ALIASES: dict[str, str] = {
     "nofluff":        "nofluffjobs",
     "nofluffjobs":    "nofluffjobs",
     "pracuj":         "pracuj",
+    "theprotocol":    "theprotocol",
+    "tp":             "theprotocol",
 }
 
 
@@ -923,6 +1135,7 @@ def scrape_all(portals: list[str] | None = None) -> list[dict]:
     scrapers = [
         ("justjoinit",      scrape_justjoinit),
         ("nofluffjobs",     scrape_nofluffjobs),
+        ("theprotocol",     scrape_theprotocol),
     ]
 
     for key, fn in scrapers:
