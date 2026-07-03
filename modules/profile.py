@@ -1,33 +1,40 @@
 CANDIDATE_PROFILE = """
-Krzysztof Zieliński – Technical Product Owner @ ING Hubs Poland
-Background: Network Engineer → Product Owner (5+ lat doświadczenia)
+Krzysztof Zielinski – Technical Product Owner @ ING Hubs Poland
+Background: Inżynier sieciowy z ponad 5-letnim doświadczeniem, który przeszedł naturalną ścieżkę kariery w kierunku Product Ownera. Od 2023 roku odpowiedzialny za product ownership, roadmap i rozwój operacyjny 18-osobowego zespołu drugiej linii Network Operations wspierającego globalną infrastrukturę bankową. Wcześniej Network Service Engineer w Atende S.A. / NASK S.A. Wykształcenie techniczne (Computer Engineering, praca dyplomowa z SD-WAN). Pracuje na co dzień po angielsku (spotkania, prezentacje, emaile, vendorzy, klienci).
 Lokalizacja: Łódź, Polska
 
-Certyfikaty: PSPO I, CCNP Enterprise, CCNA
+Certyfikaty: PSPO I (2026), CCNP Enterprise (2022), Cisco Certified Specialist – Enterprise Advanced Infrastructure Implementation (2022), CCNA (2021)
 
 Mocne strony:
-- Zarządzanie 18-osobowym zespołem Network Operations (ING) – Director's Award
-- Product ownership: roadmap planning, backlog management, sprint reviews
-- Stakeholder management, ITSM, Incident & Change Management
-- Technologie: Cisco, Palo Alto, F5, VMware ESXi
-- Narzędzia: Jira, Confluence, HP Service Manager
-- Angielski B2
-- Branże: bankowość (ING), fintech, telco
+- Wprowadzenie funkcji Tech Leada w zespole – wzrost zaangażowania, autonomii i sprawczości; zespół podejmuje bardziej złożone zadania i przejął znaczną część obowiązków zespołów L3; osiągnięcie nagrodzone Director's Award
+- Redukcja podatności (vulnerability patching) z ponad 1000 otwartych pozycji do zera poprzez przebudowę procesów wewnętrznych zespołu
+- Wzrost satysfakcji klienta dzięki regularnym spotkaniom, transparentności i poprawie komunikacji stakeholderskiej
+- Udział we wdrożeniu klienta na platformę SD-WAN (end-to-end) oraz operacyjnych onboardingach klientów
+- Translacja potrzeb biznesowych, bezpieczeństwa i operacyjnych na inicjatywy techniczne i backlog items
+- Technologie: Cisco (CCNP), Palo Alto, F5, VMware ESXi, Zabbix, Nagios, SolarWinds, Arbor
+- Narzędzia: Jira, Confluence, ServiceNow, Azure DevOps (Pipelines + Backlog); w trakcie kursu GCP
+- Angielski: codzienne użycie zawodowe (spotkania, prezentacje, dokumentacja, klienci)
 
 Oczekiwania płacowe: ~23 000 zł brutto UoP / ~25 000 zł netto B2B
 Preferencja lokalizacji (od najlepszej):
-1. Łódź hybrydowo / stacjonarnie – priorytet absolutny
+1. Łódź hybrydowo – priorytet absolutny
 2. W pełni zdalnie (full remote)
-3. Warszawa hybrydowo
-4. Gdańsk / Gdynia / Sopot hybrydowo
+3. Warszawa hybrydowo – ostateczność
 
 Preferencja branży (od najlepszej):
-1. Bankowość (ING, Commerzbank, Santander, mBank, PKO, HSBC, BNP Paribas i inne banki)
-2. Fintech (szeroko: PayU, Revolut, Stripe, payments, neobank, crypto)
-2. Healthcare (zdrowie, medtech, pharma, biotech)
-3. Inne branże
+1. Sektor finansowy / bankowość (ING, Santander, PKO, mBank, Commerzbank, HSBC, BNP Paribas)
+2. Sektor medyczny / healthcare (medtech, pharma, biotech)
+3. Inne branże technologiczne
+4. Wykluczone: firmy kontraktujące (Fujitsu, Accenture, Capgemini, Infosys itp.)
 
-Preferencja kontraktu: B2B+UoP (oba dostępne) lub samo B2B preferowane nad samym UoP
+Docelowe stanowiska (od najbardziej preferowanych):
+1. Product Owner (szczególnie zespoły Infra / DevOps / Platform)
+2. Product Manager (obszar techniczny/infrastrukturalny)
+3. Chapter Lead (zespoły inżynieryjne)
+4. IT Manager / Engineering Manager
+5. Process Owner (mniej priorytetowe, ale akceptowane)
+
+Preferencja kontraktu: Preferowany UoP; B2B akceptowane jako alternatywa
 """
 
 # ── Wagi wymiarów (suma = 1.0) ─────────────────────────────────────────────────
