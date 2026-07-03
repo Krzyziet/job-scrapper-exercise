@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Job Hunter – Kreator Profilu</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: #1a73e8;
+      color: #fff;
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; }
+    header span { font-size: .85rem; opacity: .8; }
+
+    #app {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      max-width: 820px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 24px 16px 16px;
+      gap: 16px;
+      overflow: hidden;
+    }
+
+    /* ── Upload ── */
+    #upload-area {
+      border: 2px dashed #1a73e8;
+      border-radius: 12px;
+      padding: 32px;
+      text-align: center;
+      background: #fff;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    #upload-area:hover, #upload-area.drag { background: #e8f0fe; }
+    #upload-area p { color: #555; font-size: .95rem; margin-top: 8px; }
+    #upload-area strong { color: #1a73e8; }
+    #file-input { display: none; }
+
+    #upload-status {
+      text-align: center;
+      font-size: .85rem;
+      color: #555;
+      min-height: 20px;
+    }
+
+    /* ── Chat ── */
+    #chat-section { display: none; flex: 1; flex-direction: column; gap: 12px; overflow: hidden; }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding-right: 4px;
+    }
+
+    .msg {
+      max-width: 78%;
+      padding: 12px 16px;
+      border-radius: 18px;
+      font-size: .92rem;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg.assistant {
+      background: #fff;
+      border: 1px solid #e0e0e0;
+      align-self: flex-start;
+      border-bottom-left-radius: 4px;
+    }
+    .msg.user {
+      background: #1a73e8;
+      color: #fff;
+      align-self: flex-end;
+      border-bottom-right-radius: 4px;
+    }
+
+    #input-row {
+      display: flex;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    #user-input {
+      flex: 1;
+      border: 1px solid #ccc;
+      border-radius: 24px;
+      padding: 10px 18px;
+      font-size: .95rem;
+      outline: none;
+      resize: none;
+      height: 48px;
+      max-height: 140px;
+      overflow-y: auto;
+      font-family: inherit;
+      transition: border-color .15s;
+    }
+    #user-input:focus { border-color: #1a73e8; }
+
+    button {
+      border: none;
+      border-radius: 24px;
+      padding: 0 20px;
+      height: 48px;
+      font-size: .9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s, opacity .15s;
+    }
+    button:disabled { opacity: .45; cursor: default; }
+
+    #send-btn { background: #1a73e8; color: #fff; }
+    #send-btn:hover:not(:disabled) { background: #1558b0; }
+
+    #generate-btn {
+      background: #34a853;
+      color: #fff;
+      flex-shrink: 0;
+    }
+    #generate-btn:hover:not(:disabled) { background: #2d8f47; }
+
+    /* ── Profile output ── */
+    #profile-section {
+      display: none;
+      background: #fff;
+      border: 1px solid #e0e0e0;
+      border-radius: 12px;
+      padding: 20px;
+      flex-shrink: 0;
+    }
+    #profile-section h2 {
+      font-size: 1rem;
+      color: #1a73e8;
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    #profile-code {
+      background: #1e1e2e;
+      color: #cdd6f4;
+      border-radius: 8px;
+      padding: 16px;
+      font-family: "Fira Code", "Cascadia Code", Consolas, monospace;
+      font-size: .82rem;
+      line-height: 1.6;
+      white-space: pre;
+      overflow-x: auto;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    #copy-btn {
+      background: #f0f0f0;
+      color: #333;
+      font-size: .8rem;
+      padding: 6px 14px;
+      height: auto;
+      border-radius: 8px;
+    }
+    #copy-btn:hover { background: #ddd; }
+
+    /* ── Typing indicator ── */
+    .typing { display: flex; gap: 5px; padding: 14px 18px; }
+    .typing span {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #aaa; animation: bounce .9s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: .15s; }
+    .typing span:nth-child(3) { animation-delay: .3s; }
+    @keyframes bounce {
+      0%, 60%, 100% { transform: translateY(0); }
+      30% { transform: translateY(-8px); }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>🔍 Job Hunter – Kreator Profilu</h1>
+    <span>Wgraj CV → odpowiedz na pytania → wygeneruj profil kandydata</span>
+  </div>
+</header>
+
+<div id="app">
+
+  <!-- Upload -->
+  <div id="upload-area" onclick="document.getElementById('file-input').click()"
+       ondragover="event.preventDefault();this.classList.add('drag')"
+       ondragleave="this.classList.remove('drag')"
+       ondrop="handleDrop(event)">
+    <strong>📄 Kliknij lub przeciągnij plik PDF</strong>
+    <p>Wgraj swoje CV – Claude przeanalizuje je i zada pytania uzupełniające</p>
+    <input type="file" id="file-input" accept=".pdf" onchange="uploadCV(this.files[0])">
+  </div>
+  <div id="upload-status"></div>
+
+  <!-- Chat -->
+  <div id="chat-section">
+    <div id="messages"></div>
+
+    <div id="input-row">
+      <textarea id="user-input" placeholder="Twoja odpowiedź…" rows="1"
+        onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+      <button id="send-btn" onclick="sendMessage()">Wyślij</button>
+      <button id="generate-btn" onclick="generateProfile()">Generuj profil</button>
+    </div>
+  </div>
+
+  <!-- Profile output -->
+  <div id="profile-section">
+    <h2>
+      Wygenerowany profil – wklej do <code>modules/profile.py</code>
+      <button id="copy-btn" onclick="copyProfile()">Kopiuj</button>
+    </h2>
+    <pre id="profile-code"></pre>
+  </div>
+
+</div>
+
+<script>
+  let history = [];
+
+  function setStatus(msg) {
+    document.getElementById("upload-status").textContent = msg;
+  }
+
+  function handleDrop(e) {
+    e.preventDefault();
+    document.getElementById("upload-area").classList.remove("drag");
+    const file = e.dataTransfer.files[0];
+    if (file) uploadCV(file);
+  }
+
+  async function uploadCV(file) {
+    if (!file || !file.name.endsWith(".pdf")) {
+      setStatus("⚠️ Wybierz plik PDF.");
+      return;
+    }
+    setStatus(`Wczytuję ${file.name}…`);
+
+    const fd = new FormData();
+    fd.append("cv", file);
+
+    try {
+      const res = await fetch("/upload", { method: "POST", body: fd });
+      const data = await res.json();
+      if (data.error) { setStatus("❌ " + data.error); return; }
+
+      history = data.history;
+      setStatus("");
+      document.getElementById("upload-area").style.display = "none";
+      document.getElementById("chat-section").style.display = "flex";
+      addMessage("assistant", data.message);
+    } catch (e) {
+      setStatus("❌ Błąd połączenia.");
+    }
+  }
+
+  async function sendMessage() {
+    const input = document.getElementById("user-input");
+    const text = input.value.trim();
+    if (!text) return;
+
+    input.value = "";
+    autoResize(input);
+    addMessage("user", text);
+    setButtonsDisabled(true);
+    showTyping();
+
+    try {
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ history, message: text }),
+      });
+      const data = await res.json();
+      removeTyping();
+
+      if (data.error) { addMessage("assistant", "❌ " + data.error); }
+      else {
+        history = data.history;
+        addMessage("assistant", data.message);
+        if (data.is_profile) showProfile(data.message);
+      }
+    } catch (e) {
+      removeTyping();
+      addMessage("assistant", "❌ Błąd połączenia.");
+    }
+    setButtonsDisabled(false);
+    document.getElementById("user-input").focus();
+  }
+
+  async function generateProfile() {
+    setButtonsDisabled(true);
+    addMessage("user", "Generuj profil kandydata.");
+    showTyping();
+
+    history.push({ role: "user", content: "Generuj profil kandydata." });
+
+    try {
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ history, message: "Generuj profil kandydata." }),
+      });
+      // history was already updated above, subtract duplicate
+      history.pop();
+      const data = await res.json();
+      removeTyping();
+
+      if (data.error) { addMessage("assistant", "❌ " + data.error); }
+      else {
+        history = data.history;
+        addMessage("assistant", data.message);
+        if (data.is_profile) showProfile(data.message);
+      }
+    } catch (e) {
+      removeTyping();
+      addMessage("assistant", "❌ Błąd połączenia.");
+    }
+    setButtonsDisabled(false);
+  }
+
+  function showProfile(text) {
+    const match = text.match(/CANDIDATE_PROFILE\s*=\s*"""([\s\S]*?)"""/);
+    const code = match
+      ? `CANDIDATE_PROFILE = """\n${match[1].trimEnd()}\n"""`
+      : text;
+    document.getElementById("profile-code").textContent = code;
+    document.getElementById("profile-section").style.display = "block";
+    document.getElementById("profile-section").scrollIntoView({ behavior: "smooth" });
+  }
+
+  function copyProfile() {
+    const code = document.getElementById("profile-code").textContent;
+    navigator.clipboard.writeText(code).then(() => {
+      const btn = document.getElementById("copy-btn");
+      btn.textContent = "✓ Skopiowano";
+      setTimeout(() => btn.textContent = "Kopiuj", 2000);
+    });
+  }
+
+  function addMessage(role, text) {
+    const div = document.createElement("div");
+    div.className = `msg ${role}`;
+    div.textContent = text;
+    document.getElementById("messages").appendChild(div);
+    div.scrollIntoView({ behavior: "smooth", block: "end" });
+  }
+
+  function showTyping() {
+    const div = document.createElement("div");
+    div.className = "msg assistant typing";
+    div.id = "typing-indicator";
+    div.innerHTML = "<span></span><span></span><span></span>";
+    document.getElementById("messages").appendChild(div);
+    div.scrollIntoView({ behavior: "smooth", block: "end" });
+  }
+
+  function removeTyping() {
+    document.getElementById("typing-indicator")?.remove();
+  }
+
+  function setButtonsDisabled(val) {
+    document.getElementById("send-btn").disabled = val;
+    document.getElementById("generate-btn").disabled = val;
+    document.getElementById("user-input").disabled = val;
+  }
+
+  function handleKey(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }
+
+  function autoResize(el) {
+    el.style.height = "48px";
+    el.style.height = Math.min(el.scrollHeight, 140) + "px";
+  }
+</script>
+
+</body>
+</html>
