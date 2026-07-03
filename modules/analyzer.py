@@ -101,6 +101,12 @@ _HEALTHCARE_KW = {
     "health", "medical", "hospital", "clinic", "pharma", "biotech",
     "medtech", "medicare", "meditrina", "patient", "clinical",
 }
+_OUTSOURCER_KW = {
+    "accenture", "capgemini", "infosys", "wipro", "cognizant",
+    "fujitsu", "atos", "dxc", "hcl", "tcs", "tata consultancy",
+    "globallogic", "epam", "luxoft", "softserve", "sii",
+    "objectivity", "itmagination", "ailleron",
+}
 
 
 def _location_score(location: str) -> int:
@@ -124,11 +130,13 @@ def _location_score(location: str) -> int:
     return -1
 
 
-def _sector_score(company: str, description: str = "") -> int:
+def _sector_score(company: str, description: str = "") -> tuple[bool, bool, bool]:
+    """Zwraca (banking_healthcare, fintech, outsourcer)."""
     text = (company + " " + description).lower()
-    if any(k in text for k in _BANKING_KW | _FINTECH_KW | _HEALTHCARE_KW):
-        return 1
-    return 0
+    banking_healthcare = any(k in text for k in _BANKING_KW | _HEALTHCARE_KW)
+    fintech = not banking_healthcare and any(k in text for k in _FINTECH_KW)
+    outsourcer = any(k in text for k in _OUTSOURCER_KW)
+    return banking_healthcare, fintech, outsourcer
 
 
 def _contract_score(offer: dict) -> int:
@@ -192,11 +200,14 @@ def _rule_score(offer: dict) -> dict:
         "conditions_fit":           cf,
     }
 
+    bh, ft, outsourcer = _sector_score(company, desc)
     result = {
         "dimensions":                  dimensions,
         "stretch_flag_line_management": False,
         "stretch_flag_english_c1":      False,
-        "booster_domain":               _sector_score(company, desc) > 0,
+        "booster_domain":               bh,
+        "booster_domain_fintech":       ft,
+        "booster_outsourcer":           outsourcer,
         "booster_ai":                   any(k in text_all for k in [
                                             "artificial intelligence", " ai ", "machine learning",
                                             "generative", "llm",
@@ -242,7 +253,9 @@ Zasady oceniania:
 - Rozróżniaj nieformalny wpływ na zespół (agile lead, PO, stakeholder mgmt) od formalnego line managementu (zatrudnianie/zwalnianie, oceny, bezpośrednia odpowiedzialność HR). Jeśli opis wymaga formalnego line managementu, ustaw stretch_flag_line_management=true.
 - Jeśli opis wymaga angielskiego C1/C2, a kandydat ma B2, ustaw stretch_flag_english_c1=true.
 - Brak dopasowania domenowego NIE dyskwalifikuje – ustaw booster_domain=false, ale nie karz innych wymiarów tylko za domenę.
-- booster_domain=true gdy firma/rola jest blisko domeny networking/infrastruktury kandydata.
+- booster_domain=true gdy firma to bank lub instytucja healthcare (priorytet 1 i 2 kandydata).
+- booster_domain_fintech=true gdy firma to fintech/payments (PayU, Revolut, Stripe itp.) – niższy priorytet niż bankowość.
+- booster_outsourcer=true gdy firma to outsourcer IT / body-shop (Accenture, Capgemini, Infosys, Fujitsu, Atos, DXC, SII, EPAM, Luxoft itp.) – kandydat preferuje pracodawców końcowych.
 - booster_ai=true gdy opis zawiera istotny komponent AI/ML/GenAI w zakresie obowiązków.
 
 === PROFIL KANDYDATA ===
@@ -269,6 +282,8 @@ Odpowiedz WYŁĄCZNIE tym JSON (bez markdown, bez komentarzy):
   "stretch_flag_line_management": <true|false>,
   "stretch_flag_english_c1": <true|false>,
   "booster_domain": <true|false>,
+  "booster_domain_fintech": <true|false>,
+  "booster_outsourcer": <true|false>,
   "booster_ai": <true|false>,
   "key_gaps": ["<luka 1>", "<luka 2>"],
   "match_reason": "<max 2 zdania>",

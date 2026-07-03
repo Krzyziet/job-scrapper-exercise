@@ -48,9 +48,12 @@ WEIGHTS: dict[str, float] = {
 }
 
 # Boostery – wartość * 10 = bonus punktowy (np. 0.10 * 10 = +1.0 pkt)
+# Wartości ujemne = kara (np. -0.05 * 10 = -0.5 pkt)
 BOOSTERS: dict[str, float] = {
-    "domain_match_networking_infra": 0.10,
-    "ai_component":                  0.05,
+    "domain_match_banking_healthcare": 0.10,   # +1.0 pkt: bankowość lub healthcare
+    "domain_match_fintech":            0.05,   # +0.5 pkt: fintech (niższy priorytet)
+    "ai_component":                    0.05,   # +0.5 pkt: istotny komponent AI/ML w roli
+    "outsourcer_penalty":             -0.05,   # -0.5 pkt: firma kontraktująca/outsourcing
 }
 
 # Mnożniki za stretch (nie dyskwalifikują, tylko obniżają)
@@ -63,10 +66,6 @@ VERDICT_THRESHOLD: float = 6.0
 
 
 def compute_final_score(result: dict) -> dict:
-    """
-    Liczy final_score na podstawie wymiarów i flag.
-    Uzupełnia result o: final_score (float), score (int, wsteczna zgodność), verdict.
-    """
     dims = result.get("dimensions", {})
     base = sum(dims.get(k, 0) * w for k, w in WEIGHTS.items())
 
@@ -77,11 +76,15 @@ def compute_final_score(result: dict) -> dict:
 
     bonus = 0.0
     if result.get("booster_domain"):
-        bonus += BOOSTERS["domain_match_networking_infra"] * 10
+        bonus += BOOSTERS["domain_match_banking_healthcare"] * 10
+    if result.get("booster_domain_fintech"):
+        bonus += BOOSTERS["domain_match_fintech"] * 10
     if result.get("booster_ai"):
         bonus += BOOSTERS["ai_component"] * 10
+    if result.get("booster_outsourcer"):
+        bonus += BOOSTERS["outsourcer_penalty"] * 10
 
-    final = round(min(base + bonus, 10.0), 2)
+    final = round(min(max(base + bonus, 0.0), 10.0), 2)
     return {
         **result,
         "final_score": final,
