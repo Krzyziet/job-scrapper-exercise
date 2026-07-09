@@ -77,7 +77,7 @@ def _extract_pdf_text(file_bytes: bytes) -> str:
 def _call_claude(history: list[dict], max_tokens: int = 1000) -> str:
     client = Anthropic(api_key=os.environ["CLAUDE_API_KEY"])
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-opus-4-8",
         max_tokens=max_tokens,
         system=_SYSTEM_PROMPT,
         messages=history,
