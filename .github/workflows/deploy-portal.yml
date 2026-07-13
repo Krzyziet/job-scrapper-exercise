@@ -48,7 +48,7 @@ jobs:
 
       - name: Deploy to Cloud Run Service
         run: |
-          gcloud run services deploy job-hunter-portal \
+          gcloud run deploy job-hunter-portal \
             --image="europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/job-scrapper-exercise/portal:latest" \
             --region=europe-west1 \
             --platform=managed \
