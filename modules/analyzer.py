@@ -147,11 +147,21 @@ def _contract_score(offer: dict) -> int:
     return 0
 
 
-def _rule_score(offer: dict) -> dict:
+_RULE_FALLBACK_REASONS = {
+    "no_key":   "Dopasowanie regułowe (CLAUDE_API_KEY nie jest ustawiony)",
+    "api_error": "Dopasowanie regułowe (wywołanie Claude API nie powiodło się – patrz logi)",
+}
+
+
+def _rule_score(offer: dict, reason: str = "no_key") -> dict:
     """
     Fallback scoring bez Claude.
     Produkuje dimensions (aproksymowane) i przechodzi przez compute_final_score,
     tak by struktura danych była identyczna z trybem Claude.
+
+    `reason` rozróżnia, dlaczego trafiliśmy w fallback:
+    - "no_key"    – CLAUDE_API_KEY brak/niepoprawny, Claude w ogóle nie był wywoływany
+    - "api_error" – klucz jest poprawny, ale wywołanie Claude zawiodło (timeout, JSON, itp.)
     """
     title    = offer.get("title", "").lower()
     company  = offer.get("company", "")
@@ -213,7 +223,7 @@ def _rule_score(offer: dict) -> dict:
                                             "generative", "llm",
                                         ]),
         "key_gaps":                     [],
-        "match_reason":                 "Dopasowanie regułowe (brak klucza Claude API)",
+        "match_reason":                 _RULE_FALLBACK_REASONS.get(reason, _RULE_FALLBACK_REASONS["no_key"]),
         "cv_emphasis":                  _rule_emphasis(offer),
     }
     return compute_final_score(result)
@@ -410,9 +420,11 @@ def analyze_offer(offer: dict) -> dict:
             scored = compute_final_score(result)
             return {**offer, **scored}
         logger.warning(f"[ANALYZER] brak dimensions w odpowiedzi Claude dla: {offer.get('title')}")
+        scored = _rule_score(offer, reason="api_error")
+        return {**offer, **scored}
 
-    # Fallback – scoring regułowy
-    scored = _rule_score(offer)
+    # Fallback – scoring regułowy (klucz nigdy nie był dostępny)
+    scored = _rule_score(offer, reason="no_key")
     return {**offer, **scored}
 
 
